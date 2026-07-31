@@ -1241,6 +1241,7 @@ HTML = r"""<!DOCTYPE html>
     gap: 14px;
     align-items: stretch;
   }
+  .account-login-panel .section-meta { min-width: 0; overflow-wrap: anywhere; }
   .account-login-input { min-height: 116px; }
   .account-login-side { display: flex; flex-direction: column; gap: 10px; }
   .account-login-options { display: grid; grid-template-columns: minmax(100px, 140px) minmax(0, 1fr); gap: 10px; align-items: end; }
@@ -3051,7 +3052,13 @@ function renderAccountLogin(data) {
     ["CPA 成功", summary.cpa_success ?? 0, "ok"],
     ["失败", summary.failed ?? 0, (summary.failed || 0) > 0 ? "fail" : ""],
   ].map(([label, value, cls]) => `<div class="chip"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
-  document.getElementById("account-login-status").textContent = accountLoginData.running ? ("登录中 #" + (accountLoginData.pid || "?")) : "空闲";
+  const lastReport = accountLoginData.last_report || {};
+  const statusText = accountLoginData.running
+    ? ("登录中 #" + (accountLoginData.pid || "?"))
+    : (lastReport.fatal_error
+      ? ("启动失败: " + lastReport.fatal_error)
+      : (lastReport.log ? ("空闲 · 日志 " + lastReport.log) : "空闲"));
+  document.getElementById("account-login-status").textContent = statusText;
   document.getElementById("account-login-body").innerHTML = items.length ? items.map(item => {
     const statusClass = item.status === "failed" ? "fail" : (item.status === "success" || item.status === "sso_only" ? "ok" : (item.status === "running" || item.status === "queued" ? "accent" : ""));
     return `<tr>

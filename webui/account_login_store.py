@@ -359,7 +359,8 @@ def mark_accounts_queued(ids: list[str]) -> int:
     return changed
 
 
-def reset_incomplete_accounts() -> int:
+def reset_incomplete_accounts(reason: object = "previous login job was interrupted") -> int:
+    message = _clean_text(reason) or "previous login job was interrupted"
     now = _utc_now()
     changed = 0
     with exclusive_file_lock(LOCK_PATH):
@@ -368,7 +369,7 @@ def reset_incomplete_accounts() -> int:
             if item["status"] not in {"queued", "running"}:
                 continue
             item["status"] = "pending"
-            item["last_error"] = "previous login job was interrupted"
+            item["last_error"] = message
             item["updated_at"] = now
             changed += 1
         if changed:

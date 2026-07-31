@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 try:
@@ -21,6 +22,7 @@ try:
         reset_incomplete_accounts,
     )
     from webui.process_utils import find_managed_processes, terminate_managed_processes, write_pid_file
+    from webui.security_utils import redact_log_line
 except ImportError:  # running from webui/
     ROOT = Path(__file__).resolve().parent.parent
     if str(ROOT) not in sys.path:
@@ -35,6 +37,7 @@ except ImportError:  # running from webui/
         reset_incomplete_accounts,
     )
     from process_utils import find_managed_processes, terminate_managed_processes, write_pid_file  # type: ignore
+    from security_utils import redact_log_line  # type: ignore
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,16 +53,27 @@ def _workers() -> list[dict]:
     return find_managed_processes(ROOT, ("account_login_worker.py",))
 
 
+def _latest_log_name() -> str:
+    try:
+        paths = sorted(LOG_DIR.glob("account-login-*.log"), key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return ""
+    return paths[-1].name[:160] if paths else ""
+
+
 def _read_report() -> dict:
     try:
         data = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {}
+        log_name = _latest_log_name()
+        return {"log": log_name} if log_name else {}
     if not isinstance(data, dict):
         return {}
     return {
         "started_at": str(data.get("started_at") or "")[:40],
         "finished_at": str(data.get("finished_at") or "")[:40],
+        "log": Path(str(data.get("log") or "")).name[:160] or _latest_log_name(),
+        "fatal_error": redact_log_line(str(data.get("fatal_error") or ""))[:240],
         "input_count": int(data.get("input_count") or 0),
         "extract_cpa": bool(data.get("extract_cpa")),
         "success_count": int(data.get("success_count") or 0),
@@ -139,6 +153,7 @@ def start_account_login(
         "concurrency": workers,
         "extract_cpa": want_cpa,
         "report_file": str(REPORT_FILE),
+        "log_file": str(log_path),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     atomic_write_json(JOB_FILE, job)
@@ -162,8 +177,31 @@ def start_account_login(
             start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
-    except Exception:
-        reset_incomplete_accounts()
+    except Exception as exc:
+        error = redact_log_line(f"{type(exc).__name__}: {exc}")[:240]
+        output.write(f"[account-login] worker launch failed: {error}\n")
+        output.write(redact_log_line(traceback.format_exc()))
+        output.flush()
+        reset_incomplete_accounts(f"could not start login worker: {error}")
+        try:
+            atomic_write_json(
+                REPORT_FILE,
+                {
+                    "ok": False,
+                    "started_at": job["created_at"],
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "input_count": len(ids_to_run),
+                    "extract_cpa": want_cpa,
+                    "success_count": 0,
+                    "sso_only_count": 0,
+                    "failure_count": len(ids_to_run),
+                    "cancelled_count": 0,
+                    "fatal_error": error,
+                    "log": log_path.name,
+                },
+            )
+        except Exception:
+            pass
         raise
     finally:
         output.close()

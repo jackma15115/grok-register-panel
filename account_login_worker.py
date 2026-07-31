@@ -7,6 +7,7 @@ import argparse
 import json
 import signal
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,15 @@ def _safe_error(exc: object, *secrets: object) -> str:
         if value:
             text = text.replace(value, "[redacted]")
     return redact_log_line(text)[:240] or type(exc).__name__
+
+
+def _safe_traceback(*secrets: object) -> str:
+    text = traceback.format_exc()
+    for secret in secrets:
+        value = str(secret or "")
+        if value:
+            text = text.replace(value, "[redacted]")
+    return redact_log_line(text)
 
 
 def _install_signal_handlers() -> None:
@@ -125,6 +135,8 @@ def process_one_account(record: dict, runtime, *, worker_index: int, extract_cpa
         error = "login job stopped" if STOP_EVENT.is_set() else _safe_error(exc, email, password, sso)
         update_account(account_id, status=status, sso=sso, cpa_ok=False, last_error=error)
         _log(f"[account-login W{worker_index}] {status}: {error}")
+        if status == "failed":
+            _log(_safe_traceback(email, password, sso))
         return {"id": account_id, "status": status, "has_sso": bool(sso), "error": error}
     finally:
         if browser_started:
@@ -147,8 +159,41 @@ def _read_job(path: Path) -> dict:
         "concurrency": max(1, min(5, int(data.get("concurrency") or 1))),
         "extract_cpa": bool(data.get("extract_cpa")),
         "report_file": str(data.get("report_file") or "").strip(),
+        "log_file": str(data.get("log_file") or "").strip(),
         "started_at": str(data.get("created_at") or ""),
     }
+
+
+def _startup_failure(job: dict, error: object, *, input_count: int = 0) -> int:
+    """Persist fatal worker errors before the supervisor resets stale queue rows."""
+    message = _safe_error(error)
+    detail = f"worker startup failed: {message}"
+    for account_id in job.get("ids") or []:
+        try:
+            update_account(account_id, status="failed", last_error=detail)
+        except Exception as update_exc:
+            _log(f"[account-login] could not persist startup failure for {account_id}: {update_exc}")
+    _log(f"[account-login] startup failed: {message}")
+    _log(_safe_traceback())
+    report = {
+        "ok": False,
+        "started_at": job.get("started_at") or "",
+        "finished_at": _utc_now(),
+        "input_count": input_count or len(job.get("ids") or []),
+        "extract_cpa": bool(job.get("extract_cpa")),
+        "success_count": 0,
+        "sso_only_count": 0,
+        "failure_count": len(job.get("ids") or []),
+        "cancelled_count": 0,
+        "fatal_error": message,
+        "log": Path(str(job.get("log_file") or "")).name,
+    }
+    report_path = Path(job["report_file"]) if job.get("report_file") else ROOT / "log" / "account_login_report.json"
+    try:
+        atomic_write_json(report_path, report)
+    except Exception as exc:
+        _log(f"[account-login] could not write failure report: {exc}")
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,17 +204,20 @@ def main(argv: list[str] | None = None) -> int:
 
     job_path = Path(args.job).resolve()
     job = _read_job(job_path)
-    records_by_id = {item["id"]: item for item in private_accounts(job["ids"])}
-    records = [records_by_id[item_id] for item_id in job["ids"] if item_id in records_by_id]
-    if not records:
-        raise RuntimeError("no imported accounts matched the login job")
+    try:
+        records_by_id = {item["id"]: item for item in private_accounts(job["ids"])}
+        records = [records_by_id[item_id] for item_id in job["ids"] if item_id in records_by_id]
+        if not records:
+            raise RuntimeError("no imported accounts matched the login job")
 
-    import grok_register_ttk as runtime
+        import grok_register_ttk as runtime
 
-    runtime.load_config()
-    runtime._wire_runtime_modules()
-    runtime.load_proxy_pool()
-    runtime.config["cpa_auto_add"] = bool(job["extract_cpa"])
+        runtime.load_config()
+        runtime._wire_runtime_modules()
+        runtime.load_proxy_pool()
+        runtime.config["cpa_auto_add"] = bool(job["extract_cpa"])
+    except Exception as exc:
+        return _startup_failure(job, exc)
 
     _log(
         f"[account-login] start accounts={len(records)} workers={job['concurrency']} "
@@ -194,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
                 account_id = futures[future]
                 error = _safe_error(exc)
                 update_account(account_id, status="failed", last_error=error)
+                _log(f"[account-login] account {account_id} failed: {error}")
+                _log(_safe_traceback())
                 results.append({"id": account_id, "status": "failed", "error": error})
 
     report = {
@@ -206,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         "sso_only_count": sum(1 for item in results if item.get("status") == "sso_only"),
         "failure_count": sum(1 for item in results if item.get("status") == "failed"),
         "cancelled_count": sum(1 for item in results if item.get("status") == "cancelled"),
+        "log": Path(str(job.get("log_file") or "")).name,
     }
     report_path = Path(job["report_file"]) if job["report_file"] else ROOT / "log" / "account_login_report.json"
     atomic_write_json(report_path, report)

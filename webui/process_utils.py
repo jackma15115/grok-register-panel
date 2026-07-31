@@ -9,6 +9,11 @@ import time
 from pathlib import Path
 
 try:
+    import psutil
+except ImportError:  # Optional fallback; Linux can use /proc directly.
+    psutil = None  # type: ignore[assignment]
+
+try:
     from secure_files import atomic_write_text
 except ImportError:  # running from webui/
     import sys
@@ -24,14 +29,24 @@ def _cmdline(pid: int) -> list[str]:
         raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
         return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
     except (OSError, ValueError):
-        return []
+        if psutil is None:
+            return []
+        try:
+            return [str(part) for part in psutil.Process(int(pid)).cmdline()]
+        except (psutil.Error, OSError, ValueError):
+            return []
 
 
 def _cwd(pid: int) -> Path | None:
     try:
         return Path(os.readlink(f"/proc/{int(pid)}/cwd")).resolve()
     except (OSError, ValueError):
-        return None
+        if psutil is None:
+            return None
+        try:
+            return Path(psutil.Process(int(pid)).cwd()).resolve()
+        except (psutil.Error, OSError, ValueError):
+            return None
 
 
 def _resolved_arg(arg: str, cwd: Path) -> Path | None:
@@ -68,31 +83,34 @@ def find_managed_processes(
 ) -> list[dict]:
     found = []
     proc_root = Path("/proc")
-    if not proc_root.is_dir():
+    if proc_root.is_dir():
+        pids = [int(entry.name) for entry in proc_root.iterdir() if entry.name.isdigit()]
+    elif psutil is not None:
+        pids = psutil.pids()
+    else:
         return found
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
+    for pid in pids:
         if not process_matches(pid, root, script_names):
             continue
         cmdline = _cmdline(pid)
         etime = ""
+        getpgid = getattr(os, "getpgid", None)
         try:
-            pgid = os.getpgid(pid)
+            pgid = getpgid(pid) if getpgid else None
         except OSError:
             pgid = None
-        try:
-            result = subprocess.run(
-                ["ps", "-o", "etime=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-            etime = result.stdout.strip()
-        except Exception:
-            pass
+        if os.name == "posix":
+            try:
+                result = subprocess.run(
+                    ["ps", "-o", "etime=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+                etime = result.stdout.strip()
+            except Exception:
+                pass
         found.append(
             {
                 "pid": pid,
@@ -133,6 +151,31 @@ def terminate_managed_processes(
     pids = {item["pid"] for item in processes}
     if not pids:
         return []
+
+    if os.name == "nt":
+        if psutil is None:
+            return []
+        targets = {}
+        for pid in pids:
+            try:
+                process = psutil.Process(pid)
+                for child in process.children(recursive=True):
+                    targets[child.pid] = child
+                targets[pid] = process
+            except psutil.Error:
+                pass
+        for process in targets.values():
+            try:
+                process.terminate()
+            except psutil.Error:
+                pass
+        _, alive = psutil.wait_procs(list(targets.values()), timeout=max(0.0, grace_seconds))
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.Error:
+                pass
+        return sorted(pids)
 
     groups: set[int] = set()
     direct: set[int] = set()
