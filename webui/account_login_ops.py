@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -47,6 +49,9 @@ JOB_FILE = Path(os.environ.get("ACCOUNT_LOGIN_JOB_FILE", str(LOG_DIR / "account_
 REPORT_FILE = Path(os.environ.get("ACCOUNT_LOGIN_REPORT_FILE", str(LOG_DIR / "account_login_report.json")))
 PID_FILE = Path(os.environ.get("ACCOUNT_LOGIN_PID_FILE", str(LOG_DIR / "account_login.pid")))
 VENV_PY = ROOT / ".venv" / "bin" / "python"
+_WATCH_LOCK = threading.Lock()
+_INTENTIONAL_STOPS: set[int] = set()
+_ACTIVE_WATCHERS: set[int] = set()
 
 
 def _workers() -> list[dict]:
@@ -83,15 +88,128 @@ def _read_report() -> dict:
     }
 
 
+def _last_log_diagnostic(path: Path) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 32 * 1024))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    diagnostic_terms = (
+        "error",
+        "failed",
+        "exception",
+        "errno",
+        "killed",
+        "not found",
+        "no such",
+        "denied",
+        "cannot",
+        "unable",
+        "xvfb",
+        "失败",
+        "异常",
+        "找不到",
+        "拒绝",
+        "无法",
+        "终止",
+    )
+    for raw_line in reversed(text.splitlines()):
+        line = redact_log_line(raw_line).strip()
+        if not line or line.startswith('File "') or line.startswith("Traceback ("):
+            continue
+        if line.startswith("[account-login] start "):
+            continue
+        if any(term in line.lower() for term in diagnostic_terms):
+            return line[:200]
+    return ""
+
+
+def _stale_job_reason() -> str:
+    log_name = _latest_log_name()
+    diagnostic = _last_log_diagnostic(LOG_DIR / log_name) if log_name else ""
+    if diagnostic:
+        return f"previous login worker exited: {diagnostic}"
+    return "previous login job was interrupted"
+
+
+def _worker_exit_label(return_code: int) -> str:
+    signal_number = -return_code if return_code < 0 else return_code - 128
+    if signal_number > 0:
+        signal_name = {2: "SIGINT", 9: "SIGKILL", 15: "SIGTERM"}.get(signal_number, "")
+        try:
+            signal_name = signal.Signals(signal_number).name or signal_name
+        except ValueError:
+            pass
+        if signal_name:
+            suffix = "; possible container OOM kill" if signal_name == "SIGKILL" else ""
+            return f"login worker exited with code {return_code} ({signal_name}{suffix})"
+    return f"login worker exited with code {return_code}"
+
+
+def _watch_worker(process, ids: list[str], job: dict, log_path: Path) -> None:
+    try:
+        try:
+            return_code = int(process.wait())
+        except Exception:
+            return
+        with _WATCH_LOCK:
+            intentional_stop = process.pid in _INTENTIONAL_STOPS
+        if intentional_stop or return_code == 0:
+            return
+
+        diagnostic = _last_log_diagnostic(log_path)
+        reason = _worker_exit_label(return_code)
+        if diagnostic:
+            reason = f"{reason}: {diagnostic}"
+        else:
+            reason = f"{reason} before writing diagnostics"
+        changed = reset_incomplete_accounts(reason, ids)
+        if not changed:
+            return
+        try:
+            with log_path.open("a", encoding="utf-8") as output:
+                output.write(f"[account-login] supervisor: {reason}\n")
+        except OSError:
+            pass
+        try:
+            atomic_write_json(
+                REPORT_FILE,
+                {
+                    "ok": False,
+                    "started_at": job["created_at"],
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "input_count": len(ids),
+                    "extract_cpa": bool(job["extract_cpa"]),
+                    "success_count": 0,
+                    "sso_only_count": 0,
+                    "failure_count": changed,
+                    "cancelled_count": 0,
+                    "fatal_error": reason,
+                    "log": log_path.name,
+                },
+            )
+        except Exception:
+            pass
+    finally:
+        with _WATCH_LOCK:
+            _ACTIVE_WATCHERS.discard(process.pid)
+            _INTENTIONAL_STOPS.discard(process.pid)
+
+
 def account_login_status() -> dict:
     workers = _workers()
-    if not workers:
-        reset_incomplete_accounts()
+    with _WATCH_LOCK:
+        watcher_pids = sorted(_ACTIVE_WATCHERS)
+    if not workers and not watcher_pids:
+        reset_incomplete_accounts(_stale_job_reason())
     inventory = read_account_inventory()
     return {
         **inventory,
-        "running": bool(workers),
-        "pid": workers[0]["pid"] if workers else None,
+        "running": bool(workers or watcher_pids),
+        "pid": workers[0]["pid"] if workers else (watcher_pids[0] if watcher_pids else None),
         "last_report": _read_report(),
     }
 
@@ -177,6 +295,8 @@ def start_account_login(
             start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
+        with _WATCH_LOCK:
+            _ACTIVE_WATCHERS.add(process.pid)
     except Exception as exc:
         error = redact_log_line(f"{type(exc).__name__}: {exc}")[:240]
         output.write(f"[account-login] worker launch failed: {error}\n")
@@ -206,6 +326,12 @@ def start_account_login(
     finally:
         output.close()
     write_pid_file(PID_FILE, process.pid)
+    threading.Thread(
+        target=_watch_worker,
+        args=(process, ids_to_run, job, log_path),
+        name=f"account-login-watch-{process.pid}",
+        daemon=True,
+    ).start()
     return {
         "ok": True,
         "running": True,
@@ -218,6 +344,9 @@ def start_account_login(
 
 
 def stop_account_login() -> dict:
+    workers = _workers()
+    with _WATCH_LOCK:
+        _INTENTIONAL_STOPS.update(int(item["pid"]) for item in workers)
     killed = terminate_managed_processes(ROOT, ("account_login_worker.py",))
     reset_incomplete_accounts()
     return {"ok": True, "killed": killed, "status": account_login_status()}

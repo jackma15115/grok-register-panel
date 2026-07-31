@@ -54,6 +54,7 @@ RUN apt-get update \
         libxshmfence1 \
         libxss1 \
         libxtst6 \
+        libtk8.6 \
         tini \
         tzdata \
         xauth \
@@ -67,6 +68,7 @@ RUN python -m venv /app/.venv \
     && python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir -r /app/requirements.txt \
     && python -m pip check \
+    && python -c "import tkinter; print('Tk', tkinter.Tcl().eval('info patchlevel'))" \
     && rm -rf /root/.cache/pip
 
 # Bake the Camoufox build selected by the installed package into the image.

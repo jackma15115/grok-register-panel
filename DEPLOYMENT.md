@@ -180,6 +180,12 @@ curl -H "Authorization: Bearer $MONITOR_TOKEN" http://目标地址:8787/api/stat
 
 ## 6. 运行任务
 
+原生 Debian/Ubuntu 无头环境需要 Tk 运行库和 Xvfb：
+
+```bash
+sudo apt-get install -y libtk8.6 xvfb xauth
+```
+
 单批：
 
 ```bash

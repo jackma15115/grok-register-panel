@@ -138,6 +138,12 @@ cp config.example.json config.json
 # 编辑 config.json：邮箱、proxy、cpa_auth_dir 等
 ```
 
+Debian/Ubuntu 无头运行还需要 Tk、Xvfb 和 xauth：
+
+```bash
+sudo apt-get install -y libtk8.6 xvfb xauth
+```
+
 > `pip install` 只装 Python 依赖；**不执行 `camoufox fetch` 无法启动浏览器**。
 
 ### 配置（`config.json`）

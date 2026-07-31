@@ -94,8 +94,29 @@ def test_import_has_no_account_count_limit():
     assert len(records) == 501
 
 
+def test_reset_incomplete_accounts_is_scoped_to_job_ids():
+    with tempfile.TemporaryDirectory() as temp:
+        previous = _with_temp_store(temp)
+        try:
+            store.import_account_credentials(
+                "one@example.test----password-one\n"
+                "two@example.test----password-two"
+            )
+            items = store.private_accounts()
+            store.mark_accounts_queued([item["id"] for item in items])
+            changed = store.reset_incomplete_accounts("worker exited with code 1", [items[0]["id"]])
+            assert changed == 1
+            after = {item["id"]: item for item in store.private_accounts()}
+            assert after[items[0]["id"]]["status"] == "pending"
+            assert after[items[0]["id"]]["last_error"] == "worker exited with code 1"
+            assert after[items[1]["id"]]["status"] == "queued"
+        finally:
+            store.STATE_PATH, store.LOCK_PATH = previous
+
+
 if __name__ == "__main__":
     test_import_formats_and_public_secret_redaction()
     test_deduplicate_update_and_status_changes()
     test_import_has_no_account_count_limit()
+    test_reset_incomplete_accounts_is_scoped_to_job_ids()
     print("OK account login store")

@@ -92,7 +92,67 @@ def test_start_writes_id_only_job_and_launches_worker():
             ) = previous
 
 
+def test_worker_watcher_persists_linux_launcher_failure():
+    with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp)
+        log_path = base / "account-login-test.log"
+        log_path.write_text(
+            "[account-login] start accounts=1 workers=1 extract_cpa=False\n"
+            "xvfb-run: error: Xvfb failed to start\n",
+            encoding="utf-8",
+        )
+        previous_report = ops.REPORT_FILE
+        ops.REPORT_FILE = base / "account_login_report.json"
+        process = SimpleNamespace(pid=8765, wait=lambda: 1)
+        job = {
+            "created_at": "2026-07-31T00:00:00Z",
+            "extract_cpa": False,
+        }
+        try:
+            with patch.object(ops, "reset_incomplete_accounts", return_value=1) as reset:
+                ops._watch_worker(process, ["d" * 20], job, log_path)
+            reason = reset.call_args.args[0]
+            assert "code 1" in reason
+            assert "Xvfb failed to start" in reason
+            assert reset.call_args.args[1] == ["d" * 20]
+            report = json.loads(ops.REPORT_FILE.read_text(encoding="utf-8"))
+            assert report["fatal_error"] == reason
+            assert report["log"] == log_path.name
+            assert "supervisor" in log_path.read_text(encoding="utf-8")
+        finally:
+            ops.REPORT_FILE = previous_report
+
+
+def test_status_does_not_overwrite_error_while_watcher_is_finishing():
+    with ops._WATCH_LOCK:
+        ops._ACTIVE_WATCHERS.add(9876)
+    try:
+        with patch.object(ops, "_workers", return_value=[]), patch.object(
+            ops, "reset_incomplete_accounts"
+        ) as reset, patch.object(
+            ops,
+            "read_account_inventory",
+            return_value={"ok": True, "items": [], "summary": {}},
+        ), patch.object(ops, "_read_report", return_value={}):
+            status = ops.account_login_status()
+        assert status["running"] is True
+        assert status["pid"] == 9876
+        reset.assert_not_called()
+    finally:
+        with ops._WATCH_LOCK:
+            ops._ACTIVE_WATCHERS.discard(9876)
+
+
+def test_worker_exit_label_identifies_linux_oom_signal():
+    label = ops._worker_exit_label(137)
+    assert "SIGKILL" in label
+    assert "OOM" in label
+
+
 if __name__ == "__main__":
     test_start_rejects_registration_or_recovery_conflicts()
     test_start_writes_id_only_job_and_launches_worker()
+    test_worker_watcher_persists_linux_launcher_failure()
+    test_status_does_not_overwrite_error_while_watcher_is_finishing()
+    test_worker_exit_label_identifies_linux_oom_signal()
     print("OK account login ops")

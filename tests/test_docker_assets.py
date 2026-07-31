@@ -17,6 +17,8 @@ def test_docker_image_contract() -> None:
     assert 'CMD ["python", "-u", "webui/monitor.py"]' in dockerfile
     assert 'VOLUME ["/data"]' in dockerfile
     assert "/api/health" in dockerfile
+    assert "libtk8.6" in dockerfile
+    assert "import tkinter" in dockerfile
 
     assert "MONITOR_TOKEN: \"${MONITOR_TOKEN:?" in compose
     assert "MONITOR_BIND_ADDRESS:-127.0.0.1" in compose
