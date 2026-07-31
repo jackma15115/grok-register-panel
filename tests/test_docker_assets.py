@@ -25,6 +25,7 @@ def test_docker_image_contract() -> None:
     assert "shm_size: \"1gb\"" in compose
     assert ":/data" in compose
     assert 'MONITOR_HOST: "0.0.0.0"' in compose
+    assert "MONITOR_MAX_REQUEST_BODY" in compose
 
     for runtime_dir in ("accounts", "cpa_auth", "grok2api_auth", "log"):
         assert runtime_dir in entrypoint

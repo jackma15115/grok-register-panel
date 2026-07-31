@@ -132,7 +132,14 @@ VENV_PY = ROOT / ".venv/bin/python"
 ORCH_SCRIPT = ROOT / "run_until_100.py"
 CONTROL_LOCK = threading.RLock()
 START_LOCK = threading.Lock()
-MAX_REQUEST_BODY = 64 * 1024
+DEFAULT_MAX_REQUEST_BODY = 16 * 1024 * 1024
+try:
+    MAX_REQUEST_BODY = max(
+        64 * 1024,
+        int(os.environ.get("MONITOR_MAX_REQUEST_BODY", str(DEFAULT_MAX_REQUEST_BODY))),
+    )
+except (TypeError, ValueError):
+    MAX_REQUEST_BODY = DEFAULT_MAX_REQUEST_BODY
 
 RE_OK = re.compile(r"\[\+\] 注册成功")
 RE_FAIL = re.compile(r"\[-\] 失败")
@@ -2190,6 +2197,7 @@ HTML = r"""<!DOCTYPE html>
         </div>
         <div class="button-group account-login-actions">
           <button class="primary" id="account-login-import" onclick="importAccountLoginInput()">导入账号</button>
+          <button id="account-login-select-all" onclick="toggleAccountLoginSelectAll()">全选</button>
           <button id="account-login-start-selected" onclick="startAccountLogin('selected')">登录选中</button>
           <button id="account-login-start-pending" onclick="startAccountLogin('pending')">登录待处理</button>
           <button class="danger" id="account-login-stop" onclick="stopAccountLogin()">停止</button>
@@ -3019,6 +3027,16 @@ function toggleAccountLoginSelection(id, checked) {
 function selectedAccountLoginList() {
   return Array.from(selectedAccountLoginIds);
 }
+function toggleAccountLoginSelectAll() {
+  const items = (accountLoginData && accountLoginData.items) || [];
+  const allSelected = items.length > 0 && items.every(item => selectedAccountLoginIds.has(item.id));
+  if (allSelected) {
+    items.forEach(item => selectedAccountLoginIds.delete(item.id));
+  } else {
+    items.forEach(item => selectedAccountLoginIds.add(item.id));
+  }
+  renderAccountLogin(accountLoginData || {});
+}
 function renderAccountLogin(data) {
   accountLoginData = data || {};
   const items = accountLoginData.items || [];
@@ -3048,7 +3066,10 @@ function renderAccountLogin(data) {
   }).join("") : '<tr><td colspan="7" class="account-login-empty">尚未导入账号</td></tr>';
   const running = !!accountLoginData.running;
   const selected = selectedAccountLoginIds.size;
+  const allSelected = items.length > 0 && items.every(item => selectedAccountLoginIds.has(item.id));
   document.getElementById("account-login-import").disabled = running;
+  document.getElementById("account-login-select-all").disabled = items.length === 0;
+  document.getElementById("account-login-select-all").textContent = allSelected ? "取消全选" : "全选";
   document.getElementById("account-login-start-selected").disabled = running || selected === 0;
   document.getElementById("account-login-start-pending").disabled = running || items.length === 0;
   document.getElementById("account-login-stop").disabled = !running;

@@ -186,7 +186,8 @@ def test_panel_security_and_recovery_structure():
     assert 'def _require_read(self)' in mon
     assert 'frame-ancestors \'none\'' in mon
     assert 'X-Frame-Options' in mon
-    assert 'MAX_REQUEST_BODY = 64 * 1024' in mon
+    assert 'DEFAULT_MAX_REQUEST_BODY = 16 * 1024 * 1024' in mon
+    assert 'MONITOR_MAX_REQUEST_BODY' in mon
     assert mon.index('if not self._require_write():') < mon.index('body = self._read_body()')
     assert '/api/recovery/start' in mon
     assert '/api/recovery/stop' in mon
@@ -220,6 +221,7 @@ def test_imported_account_login_panel_structure():
     assert 'id="account-login-input"' in html
     assert 'id="account-login-concurrency"' in html
     assert 'id="account-login-cpa"' in html
+    assert 'id="account-login-select-all"' in html
     assert 'id="account-login-start-selected"' in html
     assert 'id="account-login-start-pending"' in html
     assert 'id="account-login-stop"' in html
@@ -227,6 +229,7 @@ def test_imported_account_login_panel_structure():
     assert 'function refreshAccountLogin(' in mon
     assert 'function importAccountLoginInput(' in mon
     assert 'function startAccountLogin(' in mon
+    assert 'function toggleAccountLoginSelectAll(' in mon
     assert '/api/account-login/import' in mon
     assert '/api/account-login/start' in mon
     assert '/api/account-login/stop' in mon

@@ -433,6 +433,21 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
             assert password not in text
             assert "\"password\"" not in text
             assert "\"sso\"" not in text
+
+            large_accounts = "\n".join(
+                f"bulk{index}@example.test----bulk-password-{index}"
+                for index in range(1800)
+            )
+            large_payload = json.dumps({"accounts": large_accounts}).encode("utf-8")
+            assert len(large_payload) > 64 * 1024
+            status, _, body = request(
+                base + "/api/account-login/import",
+                token=token,
+                method="POST",
+                body=large_payload,
+            )
+            assert status == 200
+            assert json.loads(body)["input_count"] == 1800
         finally:
             server.shutdown()
             server.server_close()

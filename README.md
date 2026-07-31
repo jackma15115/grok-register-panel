@@ -184,6 +184,7 @@ cp config.example.json config.json
 | `EMAIL_DOMAIN_POOL_STATE_FILE` | `./log/email_domain_pool.json` | 邮箱域名池状态与规则，文件权限 `0600` |
 | `GROK_REGISTER_CONFIG_FILE` | `./config.json` | Docker 中为 `/data/config.json`；worker、面板和补录共用 |
 | `ACCOUNT_LOGIN_STATE_FILE` | `./accounts/imported_credentials.json` | 导入账号私密库存；Docker 中持久化到 `/data/accounts/` |
+| `MONITOR_MAX_REQUEST_BODY` | `16777216`（16 MiB） | 面板 JSON POST 请求体上限；导入账号数量不设条数上限，可按部署内存调高 |
 | `NEXT_ACTION_CACHE_FILE` | `./.next_action_id.cache` | Docker 中持久化到 `/data/.next_action_id.cache` |
 | `GROK_REGISTER_BROWSER_AUTO_FETCH` | `1` | 镜像内浏览器缓存缺失时自动补拉；正常构建的镜像已预装 |
 
@@ -353,7 +354,7 @@ python sso_to_auth_json.py \
 
 ### 导入账号管理
 
-- 支持 `email----password`、`email,password`、`email:password` 和 Tab 分隔；CSV 可使用 `email,password` 或 `email,passwd` 表头
+- 支持 `email----password`、`email,password`、`email:password` 和 Tab 分隔；CSV 可使用 `email,password` 或 `email,passwd` 表头。单次导入不设账号条数上限，仅受 `MONITOR_MAX_REQUEST_BODY` 请求体大小控制
 - 导入时按邮箱去重；同邮箱密码变化会清除旧 SSO / CPA 状态并重新进入待处理
 - “登录选中”只处理勾选账号；“登录待处理”会处理待处理、失败和已停止账号，开启 CPA 时也会重转已有 SSO
 - 每个账号启动独立 Camoufox 会话，沿用面板健康代理池；登录成功写入 `accounts/{email}.txt` 的 `email----password----sso` 标准格式

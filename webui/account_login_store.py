@@ -33,7 +33,6 @@ STATE_PATH = Path(
 )
 LOCK_PATH = STATE_PATH.with_suffix(STATE_PATH.suffix + ".lock")
 
-MAX_IMPORT_ITEMS = 500
 MAX_EMAIL_LENGTH = 254
 MAX_PASSWORD_LENGTH = 1024
 ALLOWED_STATUSES = {
@@ -137,21 +136,15 @@ def parse_account_credentials(text: object) -> list[tuple[str, str]]:
                 raise AccountImportError(f"line {line_number}: unsupported account format")
             candidates.append((email, password))
 
-    if len(candidates) > MAX_IMPORT_ITEMS:
-        raise AccountImportError(f"at most {MAX_IMPORT_ITEMS} accounts can be imported at once")
-
-    result: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    deduplicated: dict[str, str] = {}
     for index, (email_value, password_value) in enumerate(candidates, 1):
         try:
             email = _normalize_email(email_value)
             password = _normalize_password(password_value)
         except AccountImportError as exc:
             raise AccountImportError(f"row {index}: {exc}") from exc
-        if email in seen:
-            result = [item for item in result if item[0] != email]
-        seen.add(email)
-        result.append((email, password))
+        deduplicated[email] = password
+    result = list(deduplicated.items())
     if not result:
         raise AccountImportError("no account credentials found")
     return result
@@ -190,14 +183,14 @@ def _normalize_item(raw: object) -> dict | None:
 def _normalize_state(raw: object) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("account login state must be an object")
-    items_by_id: dict[str, dict] = {}
+    items_by_email: dict[str, dict] = {}
     for candidate in raw.get("items") or []:
         item = _normalize_item(candidate)
         if item:
-            items_by_id[item["id"]] = item
+            items_by_email[item["email"]] = item
     return {
         "version": 1,
-        "items": list(items_by_id.values()),
+        "items": list(items_by_email.values()),
         "updated_at": _clean_text(raw.get("updated_at"), 40) or _utc_now(),
     }
 
@@ -252,15 +245,15 @@ def import_account_credentials(text: object) -> dict:
     now = _utc_now()
     with exclusive_file_lock(LOCK_PATH):
         state = _read_unlocked()
-        by_id = {item["id"]: item for item in state["items"]}
+        by_email = {item["email"]: item for item in state["items"]}
         added = 0
         updated = 0
         unchanged = 0
         for email, password in records:
             item_id = _account_id(email)
-            existing = by_id.get(item_id)
+            existing = by_email.get(email)
             if existing is None:
-                by_id[item_id] = {
+                by_email[email] = {
                     "id": item_id,
                     "email": email,
                     "password": password,
@@ -287,7 +280,7 @@ def import_account_credentials(text: object) -> dict:
                 updated += 1
             else:
                 unchanged += 1
-        state["items"] = list(by_id.values())
+        state["items"] = list(by_email.values())
         _write_unlocked(state)
     return {
         "ok": True,
@@ -295,7 +288,6 @@ def import_account_credentials(text: object) -> dict:
         "added": added,
         "updated": updated,
         "unchanged": unchanged,
-        "inventory": read_account_inventory(),
     }
 
 
@@ -395,4 +387,4 @@ def delete_accounts(ids: object) -> dict:
         deleted = before - len(state["items"])
         if deleted:
             _write_unlocked(state)
-    return {"ok": True, "deleted": deleted, "inventory": read_account_inventory()}
+    return {"ok": True, "deleted": deleted}

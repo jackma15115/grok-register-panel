@@ -22,6 +22,7 @@ services:
       GROK_REGISTER_DATA_DIR: "/data"
       GROK_REGISTER_CONFIG_FILE: "/data/config.json"
       ACCOUNT_LOGIN_STATE_FILE: "/data/accounts/imported_credentials.json"
+      MONITOR_MAX_REQUEST_BODY: "${MONITOR_MAX_REQUEST_BODY:-16777216}"
       NEXT_ACTION_CACHE_FILE: "/data/.next_action_id.cache"
       GROK_REGISTER_BROWSER_AUTO_FETCH: "${GROK_REGISTER_BROWSER_AUTO_FETCH:-1}"
       GROK_BATCH_IDLE_TIMEOUT: "${GROK_BATCH_IDLE_TIMEOUT:-360}"

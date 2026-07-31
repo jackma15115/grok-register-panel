@@ -55,12 +55,13 @@ def test_deduplicate_update_and_status_changes():
         previous = _with_temp_store(temp)
         try:
             result = store.import_account_credentials(
-                "same@example.test----old-pass\nsame@example.test----new-pass"
+                "Same@Example.Test----old-pass\nsame@example.test----new-pass"
             )
             assert result["input_count"] == 1
             assert result["added"] == 1
             item = store.private_accounts()[0]
             assert item["password"] == "new-pass"
+            assert store.read_account_inventory()["summary"]["total"] == 1
 
             store.update_account(
                 item["id"],
@@ -84,7 +85,17 @@ def test_deduplicate_update_and_status_changes():
             store.STATE_PATH, store.LOCK_PATH = previous
 
 
+def test_import_has_no_account_count_limit():
+    text = "\n".join(
+        f"person{index}@example.test----password-{index}"
+        for index in range(501)
+    )
+    records = store.parse_account_credentials(text)
+    assert len(records) == 501
+
+
 if __name__ == "__main__":
     test_import_formats_and_public_secret_redaction()
     test_deduplicate_update_and_status_changes()
+    test_import_has_no_account_count_limit()
     print("OK account login store")

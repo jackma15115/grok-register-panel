@@ -13,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     GROK_REGISTER_DATA_DIR=/data \
     GROK_REGISTER_CONFIG_FILE=/data/config.json \
     ACCOUNT_LOGIN_STATE_FILE=/data/accounts/imported_credentials.json \
+    MONITOR_MAX_REQUEST_BODY=16777216 \
     NEXT_ACTION_CACHE_FILE=/data/.next_action_id.cache \
     MONITOR_HOST=0.0.0.0 \
     MONITOR_PORT=8787 \

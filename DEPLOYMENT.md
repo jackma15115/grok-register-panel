@@ -224,6 +224,8 @@ scripts/run_xvfb_batch.sh 10
 面板的“导入账号管理”支持粘贴 `email + password`，启动 Camoufox 登录并提取 SSO。
 Docker 会把库存保存到 `/data/accounts/imported_credentials.json`，把任务和报告保存到
 `/data/log/`。库存文件包含明文密码，必须保持 `0600`、只做加密或受控备份。
+单次导入不限制账号条数，默认 POST 请求体为 16 MiB；需要更大批次时设置
+`MONITOR_MAX_REQUEST_BODY`（例如 `67108864` 表示 64 MiB）。
 
 开启“提取 CPA / Grok2API”时，worker 继续使用 `/data/config.json` 中的
 `cpa_auth_dir`、`cpa_remote_url` 和 `grok2api_auth_dir`。登录任务与注册、账号补录任务互斥。

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add private imported-account management with password login, SSO extraction, optional CPA/Grok2API conversion, concurrent Docker/Xvfb workers, task controls, and secret-free API views.
+- Add private imported-account management with unlimited account-count imports, configurable large POST bodies, password login, SSO extraction, optional CPA/Grok2API conversion, concurrent Docker/Xvfb workers, task controls, and secret-free API views.
 - Add a Docker-first deployment with baked Camoufox, Xvfb/browser dependencies, Compose health checks, strong panel authentication, unified `/data` persistence, and automated GHCR publishing.
 - Add TI Temp Mail with optional create-token authentication, main/subdomain modes, domain-pool rotation, connectivity checks, and redacted mailbox activity in the panel.
 - Add authenticated exports for SSO-only text and `email,passwd` CSV account data, including pending SSO records while excluding risk-rejected records.
