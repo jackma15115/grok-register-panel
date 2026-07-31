@@ -106,7 +106,9 @@ def _run_child(count: int, workers: int) -> int:
     import grok_register_ttk as app
 
     connectivity.has_blocking_xai_failure = lambda _results: False
-    config_path = ROOT / "config.json"
+    config_path = Path(
+        os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
+    )
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["register_count"] = count
     config["register_workers"] = workers

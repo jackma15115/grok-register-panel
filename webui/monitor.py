@@ -43,6 +43,14 @@ try:
         save_email_provider_config,
         test_email_provider_config,
     )
+    from webui.account_exports import credentials_csv_export, sso_export
+    from webui.account_login_ops import (
+        account_login_status,
+        delete_imported_accounts,
+        import_accounts,
+        start_account_login,
+        stop_account_login,
+    )
     from webui.process_utils import (
         find_managed_processes,
         terminate_managed_processes,
@@ -79,6 +87,14 @@ except ImportError:  # running as script from webui/
         save_email_provider_config,
         test_email_provider_config,
     )
+    from account_exports import credentials_csv_export, sso_export  # type: ignore
+    from account_login_ops import (  # type: ignore
+        account_login_status,
+        delete_imported_accounts,
+        import_accounts,
+        start_account_login,
+        stop_account_login,
+    )
     from process_utils import (  # type: ignore
         find_managed_processes,
         terminate_managed_processes,
@@ -94,6 +110,9 @@ except ImportError:  # running as script from webui/
     )
 LOG_DIR = ROOT / "log"
 CPA_DIR = Path(os.environ.get("CPA_AUTH_DIR", str(ROOT / "cpa_auth")))
+CONFIG_FILE = Path(
+    os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
+)
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 FONT_ASSETS = {
     "/assets/geist.woff2": ASSET_DIR / "geist-latin-wght-normal.woff2",
@@ -125,7 +144,7 @@ RE_EMAIL_OK = re.compile(r"\[\+\] 注册成功(?:（[^）]*）)?:\s*(\S+)")
 RE_FAIL_KIND = re.compile(r"\[-\] 失败 \[([^\]]+)\]:\s*(.*)")
 RE_WORKER = re.compile(r"\[W(\d+)\]")
 RE_BATCH = re.compile(r"\[batch\] count=(\d+) workers=(\d+)")
-RE_START = re.compile(r"终端模式启动，目标数量:\s*(\d+)\s*\|\s*并发:\s*(\d+)")
+RE_START = re.compile(r"终端模式启动，目标(?:成功数|数量):\s*(\d+)\s*\|\s*并发:\s*(\d+)")
 RE_END = re.compile(r"任务结束。成功\s*(\d+)\s*\|\s*失败\s*(\d+)")
 RE_ADDED_BL = re.compile(r"ADDED blacklist AS(\d+)")
 RE_LOOKUP_FAIL = re.compile(r"lookup fail", re.I)
@@ -328,6 +347,11 @@ def parse_log(path, max_tail=400_000):
             bot1 += 1
 
     last_lines = lines[-40:]
+    mail_lines = [
+        redact_log_line(line)
+        for line in lines
+        if "[ti temp mail]" in line.lower() or "[ti-temp-mail]" in line.lower()
+    ][-20:]
     if size > max_tail:
         def gcount(pat):
             r = subprocess.run(["grep", "-c", pat, str(path)], capture_output=True, text=True)
@@ -361,6 +385,7 @@ def parse_log(path, max_tail=400_000):
         "recent_ok": recent_ok[-25:][::-1],
         "recent_fail": recent_fail[-25:][::-1],
         "tail": [redact_log_line(line) for line in last_lines],
+        "mail_tail": mail_lines,
     }
 
 
@@ -594,8 +619,8 @@ def kill_all():
 def _runtime_prerequisite_error() -> str | None:
     if not VENV_PY.is_file():
         return f"missing runtime python: {VENV_PY}"
-    if not (ROOT / "config.json").is_file():
-        return f"missing config: {ROOT / 'config.json'}"
+    if not CONFIG_FILE.is_file():
+        return f"missing config: {CONFIG_FILE}"
     return None
 
 
@@ -605,6 +630,8 @@ def _start_orch_unlocked():
         return {"ok": False, "error": "already running", "process": proc}
     if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
         return {"ok": False, "error": "account recovery is running"}
+    if find_managed_processes(ROOT, ("account_login_worker.py",)):
+        return {"ok": False, "error": "account login task is running"}
     prerequisite_error = _runtime_prerequisite_error()
     if prerequisite_error:
         return {"ok": False, "error": prerequisite_error}
@@ -682,6 +709,8 @@ def _start_batch_only_unlocked():
         return {"ok": False, "error": "already running", "process": proc}
     if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
         return {"ok": False, "error": "account recovery is running"}
+    if find_managed_processes(ROOT, ("account_login_worker.py",)):
+        return {"ok": False, "error": "account login task is running"}
     prerequisite_error = _runtime_prerequisite_error()
     if prerequisite_error:
         return {"ok": False, "error": prerequisite_error}
@@ -1199,6 +1228,24 @@ HTML = r"""<!DOCTYPE html>
   .recovery-layout { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .recovery-layout .chips { flex: 1 1 auto; }
   .recovery-actions { flex: 0 0 auto; }
+  .account-login-controls {
+    display: grid;
+    grid-template-columns: minmax(280px, 1.7fr) minmax(260px, 1fr);
+    gap: 14px;
+    align-items: stretch;
+  }
+  .account-login-input { min-height: 116px; }
+  .account-login-side { display: flex; flex-direction: column; gap: 10px; }
+  .account-login-options { display: grid; grid-template-columns: minmax(100px, 140px) minmax(0, 1fr); gap: 10px; align-items: end; }
+  .inline-check { min-height: 38px; display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 12px; }
+  .inline-check input, input.account-select { width: 16px; min-height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
+  .account-login-actions { justify-content: flex-start; }
+  .account-login-summary { margin-top: 14px; }
+  .account-login-table-wrap { max-height: 360px; margin-top: 12px; overflow: auto; border: 1px solid var(--border); background: var(--surface-soft); }
+  .account-login-table { min-width: 820px; }
+  .account-login-table th:first-child, .account-login-table td:first-child { width: 42px; text-align: center; }
+  .account-login-result { max-width: 280px; overflow-wrap: anywhere; }
+  .account-login-empty { padding: 22px 10px; text-align: center; color: var(--muted); }
   body.proxy-view-open { overflow: hidden; }
   body.proxy-view-open #dashboard-view > :not(#proxy-view) { display: none; }
   .proxy-view {
@@ -1369,6 +1416,8 @@ HTML = r"""<!DOCTYPE html>
   }
   .mail-provider-actions .mail-provider-meta { margin-left: auto; color: var(--muted); font-size: 11px; }
   .mail-provider-result { min-height: 18px; margin-top: 10px; }
+  .mail-log-panel { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border-strong); }
+  .mail-log-panel .tail { max-height: 220px; }
   .domain-advanced { margin-top: 20px; border-top: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); }
   .domain-advanced > summary {
     display: flex;
@@ -1630,6 +1679,9 @@ HTML = r"""<!DOCTYPE html>
     .recovery-layout { align-items: stretch; flex-direction: column; }
     .recovery-actions { justify-content: stretch; }
     .recovery-actions button { flex: 1 1 0; }
+    .account-login-controls, .account-login-options { grid-template-columns: minmax(0, 1fr); }
+    .account-login-actions { justify-content: stretch; }
+    .account-login-actions button { flex: 1 1 auto; }
     .proxy-view { inset-block-start: 60px; }
     .proxy-view-inner { width: calc(100% - 24px); padding: 20px 0 34px; }
     .proxy-view-heading { align-items: flex-start; flex-direction: column; margin-bottom: 16px; padding-bottom: 16px; }
@@ -1790,7 +1842,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="field"><label for="workers-input">并发数</label>
         <input type="number" id="workers-input" min="1" max="24" value="3"/>
       </div>
-      <div class="field"><label for="batch_count">单批数量</label>
+      <div class="field"><label for="batch_count">单批目标成功数</label>
         <input type="number" id="batch_count" min="1" max="200" value="40"/>
       </div>
       <div class="field"><label for="add_count">追加目标</label>
@@ -1830,7 +1882,7 @@ HTML = r"""<!DOCTYPE html>
           </div>
           <div class="help-guide-item">
             <h3>选择模式</h3>
-            <p><code>持续编排</code>按追加目标多轮运行；<code>单批运行</code>只执行单批数量。首次建议并发 2-3。</p>
+            <p><code>持续编排</code>按追加目标多轮运行；<code>单批运行</code>会补位失败尝试，直到达到目标成功数。首次建议并发 2-3。</p>
           </div>
           <div class="help-guide-item">
             <h3>保存并启动</h3>
@@ -1857,7 +1909,7 @@ HTML = r"""<!DOCTYPE html>
           </details>
           <details class="faq-item" data-faq-item data-search="启动 立即结束 目标 cpa add_count 追加目标">
             <summary>点击启动后立即结束</summary>
-            <div class="faq-answer">通常是 CPA 已达到旧目标。提高“追加目标”后再启动；持续编排会以当前 CPA 为基线增加 N，单批运行只执行“单批数量”。</div>
+            <div class="faq-answer">通常是 CPA 已达到旧目标。提高“追加目标”后再启动；持续编排会以当前 CPA 为基线增加 N，单批运行按“目标成功数”补位失败尝试。</div>
           </details>
           <details class="faq-item" data-faq-item data-search="风控 policy deny registration risk botFlagSource ip 邮箱 域名">
             <summary>出现 policy=deny 或注册风控</summary>
@@ -1883,7 +1935,7 @@ HTML = r"""<!DOCTYPE html>
             <summary>邮箱 API 返回 401 或请求超时</summary>
             <div class="faq-answer">401 先检查对应邮箱服务的 key 和 <code>auth_mode</code>。访问 workers.dev 超时时，在配置中显式填写代理，不要只依赖桌面进程可能无法继承的 HTTP_PROXY 环境变量。</div>
           </details>
-          <details class="faq-item" data-faq-item data-search="邮箱服务 provider cloudflare duckmail yyds mailnest cloudmail moemail api 测试 域名轮换">
+          <details class="faq-item" data-faq-item data-search="邮箱服务 provider cloudflare duckmail yyds mailnest cloudmail moemail ti temp mail api 测试 域名轮换">
             <summary>如何配置邮箱服务</summary>
             <div class="faq-answer">打开顶部“邮箱服务”，选择当前使用的服务商后填写对应 API 配置，保存并测试连通性。自有域名轮换位于同页高级设置；只有 xAI 明确拒绝域名才累计，邮箱 API 和验证码异常不会处罚域名。</div>
           </details>
@@ -1996,6 +2048,14 @@ HTML = r"""<!DOCTYPE html>
         <div class="msg mail-provider-result" id="mail-provider-msg" role="status" aria-live="polite"></div>
       </section>
 
+      <section class="mail-log-panel" aria-labelledby="mail-log-title">
+        <div class="section-head">
+          <h2 id="mail-log-title">收件日志</h2>
+          <span class="section-meta mono">TI Temp Mail</span>
+        </div>
+        <div class="tail mono" id="mail-tail">暂无 TI Temp Mail 收件记录</div>
+      </section>
+
       <details class="domain-advanced" id="domain-advanced">
         <summary>
           <span class="domain-advanced-title">域名轮换 <span class="domain-advanced-meta">高级设置</span></span>
@@ -2029,6 +2089,7 @@ HTML = r"""<!DOCTYPE html>
                     <option value="cloudmail">CloudMail</option>
                     <option value="moemail">MoeMail</option>
                     <option value="yyds">YYDS</option>
+                    <option value="ti-temp-mail">TI Temp Mail</option>
                   </select>
                 </div>
                 <div class="field">
@@ -2040,7 +2101,7 @@ HTML = r"""<!DOCTYPE html>
                   <input type="number" id="domain-max-active" min="0" max="100" value="0" title="0 表示不限"/>
                 </div>
               </div>
-              <p class="domain-format">Cloudflare、CloudMail、MoeMail 与 YYDS 可绑定自有域名；0 表示不限制活跃数。</p>
+              <p class="domain-format">Cloudflare、CloudMail、MoeMail、YYDS 与 TI Temp Mail 可绑定自有域名；0 表示不限制活跃数。</p>
               <div class="button-group">
                 <button class="primary" id="domain-import-button" onclick="importDomainInput()">导入域名</button>
                 <button id="domain-settings-button" onclick="saveDomainSettings()">保存规则</button>
@@ -2098,10 +2159,53 @@ HTML = r"""<!DOCTYPE html>
       <div class="button-group recovery-actions">
         <button id="recovery-pending" onclick="startRecovery('pending')">补录待处理</button>
         <button id="recovery-accounts" onclick="startRecovery('accounts')">扫描全部账号</button>
+        <button id="export-sso" onclick="downloadAccountExport('/api/accounts/export-sso')" title="每行一个 SSO，包含待授权记录">导出 SSO</button>
+        <button id="export-credentials" onclick="downloadAccountExport('/api/accounts/export-credentials-csv')" title="导出全部账号的 email、passwd 列">导出账号 CSV</button>
         <button class="danger" id="recovery-stop" onclick="stopRecovery()">停止补录</button>
       </div>
     </div>
     <div class="msg" id="recovery-msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card panel account-login-panel" aria-labelledby="account-login-title">
+    <div class="section-head">
+      <h2 id="account-login-title">导入账号管理</h2>
+      <span class="section-meta mono" id="account-login-status">等待检查</span>
+    </div>
+    <div class="account-login-controls">
+      <div class="field">
+        <label for="account-login-input">账号密码</label>
+        <textarea class="account-login-input mono" id="account-login-input" placeholder="email----password&#10;email,password&#10;email:password"></textarea>
+      </div>
+      <div class="account-login-side">
+        <div class="account-login-options">
+          <div class="field">
+            <label for="account-login-concurrency">登录并发</label>
+            <input id="account-login-concurrency" type="number" min="1" max="5" value="1">
+          </div>
+          <label class="inline-check" for="account-login-cpa">
+            <input id="account-login-cpa" type="checkbox" checked>
+            <span>提取 CPA / Grok2API</span>
+          </label>
+        </div>
+        <div class="button-group account-login-actions">
+          <button class="primary" id="account-login-import" onclick="importAccountLoginInput()">导入账号</button>
+          <button id="account-login-start-selected" onclick="startAccountLogin('selected')">登录选中</button>
+          <button id="account-login-start-pending" onclick="startAccountLogin('pending')">登录待处理</button>
+          <button class="danger" id="account-login-stop" onclick="stopAccountLogin()">停止</button>
+          <button class="danger" id="account-login-delete" onclick="deleteAccountLoginSelected()">删除选中</button>
+          <button id="account-login-refresh" onclick="refreshAccountLogin(true)">刷新</button>
+        </div>
+      </div>
+    </div>
+    <div class="chips account-login-summary" id="account-login-kpis"></div>
+    <div class="msg" id="account-login-msg" role="status" aria-live="polite"></div>
+    <div class="account-login-table-wrap">
+      <table class="account-login-table">
+        <thead><tr><th>选择</th><th>邮箱</th><th>状态</th><th>SSO</th><th>CPA</th><th>最近结果</th><th>更新时间</th></tr></thead>
+        <tbody id="account-login-body"><tr><td colspan="7" class="account-login-empty">尚未导入账号</td></tr></tbody>
+      </table>
+    </div>
   </section>
 
   <div class="three panel-gap">
@@ -2166,6 +2270,8 @@ let last = null;
 let proxyData = null;
 let domainData = null;
 let emailProviderData = null;
+let accountLoginData = null;
+const selectedAccountLoginIds = new Set();
 let selectedEmailProvider = "";
 const clearedEmailSecrets = new Set();
 const THEME_KEY = "GROK_REGISTER_THEME";
@@ -2553,7 +2659,7 @@ function renderEmailProviderFields(provider) {
     `<div class="field"><label for="mail-field-${esc(field.name)}">${esc(field.label)}</label>${emailProviderFieldControl(field)}</div>`
   ).join("") || '<div class="field"><label>服务配置</label><input disabled value="该服务商没有可编辑字段"/></div>';
   const domainProvider = document.getElementById("domain-provider");
-  if (domainProvider && ["cloudflare", "cloudmail", "moemail", "yyds"].includes(definition.id)) {
+  if (domainProvider && ["cloudflare", "cloudmail", "moemail", "yyds", "ti-temp-mail"].includes(definition.id)) {
     domainProvider.value = definition.id;
     if (domainData) renderEmailDomainPool(domainData);
   }
@@ -2893,6 +2999,141 @@ async function stopRecovery() {
     await refreshRecovery();
   } catch (e) { setMsg("recovery-msg", String(e.message || e), "err"); }
 }
+
+function accountLoginStatusLabel(status) {
+  return ({
+    pending: "待处理", queued: "排队中", running: "登录中", success: "CPA 成功",
+    sso_only: "SSO 已提取", failed: "失败", cancelled: "已停止"
+  })[status] || String(status || "待处理");
+}
+function accountLoginTime(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+}
+function toggleAccountLoginSelection(id, checked) {
+  if (checked) selectedAccountLoginIds.add(id); else selectedAccountLoginIds.delete(id);
+  renderAccountLogin(accountLoginData || {});
+}
+function selectedAccountLoginList() {
+  return Array.from(selectedAccountLoginIds);
+}
+function renderAccountLogin(data) {
+  accountLoginData = data || {};
+  const items = accountLoginData.items || [];
+  const validIds = new Set(items.map(item => item.id));
+  Array.from(selectedAccountLoginIds).forEach(id => { if (!validIds.has(id)) selectedAccountLoginIds.delete(id); });
+  const summary = accountLoginData.summary || {};
+  document.getElementById("account-login-kpis").innerHTML = [
+    ["总数", summary.total ?? 0, ""],
+    ["待处理", summary.pending ?? 0, (summary.pending || 0) > 0 ? "warn" : ""],
+    ["运行中", (summary.queued || 0) + (summary.running || 0), accountLoginData.running ? "accent" : ""],
+    ["SSO 成功", summary.sso_success ?? 0, "ok"],
+    ["CPA 成功", summary.cpa_success ?? 0, "ok"],
+    ["失败", summary.failed ?? 0, (summary.failed || 0) > 0 ? "fail" : ""],
+  ].map(([label, value, cls]) => `<div class="chip"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
+  document.getElementById("account-login-status").textContent = accountLoginData.running ? ("登录中 #" + (accountLoginData.pid || "?")) : "空闲";
+  document.getElementById("account-login-body").innerHTML = items.length ? items.map(item => {
+    const statusClass = item.status === "failed" ? "fail" : (item.status === "success" || item.status === "sso_only" ? "ok" : (item.status === "running" || item.status === "queued" ? "accent" : ""));
+    return `<tr>
+      <td><input class="account-select" type="checkbox" aria-label="选择 ${esc(item.email)}" ${selectedAccountLoginIds.has(item.id) ? "checked" : ""} onchange="toggleAccountLoginSelection('${esc(item.id)}', this.checked)"></td>
+      <td class="mono">${esc(item.email)}</td>
+      <td class="${statusClass}">${esc(accountLoginStatusLabel(item.status))}</td>
+      <td>${item.has_sso ? '<span class="ok">已提取</span>' : '--'}</td>
+      <td>${item.cpa_ok ? '<span class="ok">已写入</span>' : '--'}</td>
+      <td class="account-login-result">${esc(item.last_error || "--")}</td>
+      <td class="mono">${esc(accountLoginTime(item.updated_at))}</td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="7" class="account-login-empty">尚未导入账号</td></tr>';
+  const running = !!accountLoginData.running;
+  const selected = selectedAccountLoginIds.size;
+  document.getElementById("account-login-import").disabled = running;
+  document.getElementById("account-login-start-selected").disabled = running || selected === 0;
+  document.getElementById("account-login-start-pending").disabled = running || items.length === 0;
+  document.getElementById("account-login-stop").disabled = !running;
+  document.getElementById("account-login-delete").disabled = running || selected === 0;
+}
+async function refreshAccountLogin(authHelp = false) {
+  try {
+    const data = await api("/api/account-login?_=" + Date.now(), { authHelp });
+    renderAccountLogin(data);
+  } catch (e) {
+    const message = String(e.message || e);
+    document.getElementById("account-login-status").textContent = message.includes("令牌") ? "等待令牌" : "检查失败";
+  }
+}
+async function importAccountLoginInput() {
+  const input = document.getElementById("account-login-input");
+  const value = input.value || "";
+  if (!value.trim()) { setMsg("account-login-msg", "请输入账号密码", "err"); return; }
+  setMsg("account-login-msg", "正在导入…", "");
+  try {
+    const data = await api("/api/account-login/import", { method: "POST", body: JSON.stringify({ accounts: value }) });
+    input.value = "";
+    setMsg("account-login-msg", `已导入：新增 ${data.added || 0}，更新 ${data.updated || 0}，未变 ${data.unchanged || 0}`, "ok");
+    await refreshAccountLogin(false);
+  } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
+}
+async function startAccountLogin(scope) {
+  const ids = scope === "selected" ? selectedAccountLoginList() : [];
+  if (scope === "selected" && !ids.length) { setMsg("account-login-msg", "请先选择账号", "err"); return; }
+  const concurrency = Number(document.getElementById("account-login-concurrency").value || 1);
+  const extractCpa = document.getElementById("account-login-cpa").checked;
+  setMsg("account-login-msg", "正在启动登录任务…", "");
+  try {
+    const data = await api("/api/account-login/start", { method: "POST", body: JSON.stringify({ ids, scope, concurrency, extract_cpa: extractCpa }) });
+    setMsg("account-login-msg", "登录任务已启动，共 " + (data.input_count || 0) + " 个账号", "ok");
+    await refreshAccountLogin(false);
+  } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
+}
+async function stopAccountLogin() {
+  try {
+    const data = await api("/api/account-login/stop", { method: "POST", body: "{}" });
+    setMsg("account-login-msg", "登录任务已停止，结束进程 " + JSON.stringify(data.killed || []), "ok");
+    await refreshAccountLogin(false);
+  } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
+}
+async function deleteAccountLoginSelected() {
+  const ids = selectedAccountLoginList();
+  if (!ids.length) { setMsg("account-login-msg", "请先选择账号", "err"); return; }
+  if (!confirm("删除选中的导入账号记录？已生成的 accounts/ 和 auth 文件不会删除。")) return;
+  try {
+    const data = await api("/api/account-login/delete", { method: "POST", body: JSON.stringify({ ids }) });
+    selectedAccountLoginIds.clear();
+    setMsg("account-login-msg", "已删除 " + (data.deleted || 0) + " 条导入记录", "ok");
+    await refreshAccountLogin(false);
+  } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
+}
+
+async function downloadAccountExport(path) {
+  setMsg("recovery-msg", "正在生成导出文件…", "");
+  try {
+    const headers = {};
+    const token = getToken();
+    if (token) headers.Authorization = "Bearer " + token;
+    const response = await fetch(path, { headers, cache: "no-store" });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      if (response.status === 401) showHelpFor("令牌");
+      throw new Error(error.error || response.statusText || "导出失败");
+    }
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match ? match[1] : "grok-register-export.txt";
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setMsg("recovery-msg", "导出已生成", "ok");
+  } catch (error) {
+    setMsg("recovery-msg", String(error.message || error), "err");
+  }
+}
 function renderBlacklist(bl, upd) {
   bl = bl || {};
   upd = upd || {};
@@ -3032,6 +3273,10 @@ function render(d) {
     `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td>${esc(r.kind)}</td><td class="mono">${esc(r.msg)}</td></tr>`
   ).join("") || '<tr><td colspan="4" style="color:var(--muted)">暂无记录</td></tr>';
   document.getElementById("tail").textContent = (d.tail || []).join("\n");
+  const mailTail = document.getElementById("mail-tail");
+  if (mailTail) {
+    mailTail.textContent = (d.mail_tail || []).join("\n") || "暂无 TI Temp Mail 收件记录";
+  }
   document.getElementById("footer").textContent =
     "服务 " + location.host + " / 日志 " + (d.log || "") + " / 2 秒轮询 / "
     + (d.log_size ? (d.log_size / 1024).toFixed(0) + " KB" : "0 KB")
@@ -3045,7 +3290,9 @@ setInterval(refresh, 2000);
 // full stats once on load
 refreshStats(false);
 refreshRecovery();
+refreshAccountLogin(false);
 setInterval(refreshRecovery, 5000);
+setInterval(() => refreshAccountLogin(false), 5000);
 setInterval(() => {
   if (document.body.classList.contains("proxy-view-open")) refreshProxies(false);
   if (document.body.classList.contains("domain-view-open")) refreshEmailDomains(false);
@@ -3069,7 +3316,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         super().log_message(fmt, *args)
 
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, extra_headers=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
@@ -3079,6 +3326,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        for name, value in dict(extra_headers or {}).items():
+            self.send_header(str(name), str(value))
         self.send_header(
             "Permissions-Policy",
             "camera=(), microphone=(), geolocation=(), payment=()",
@@ -3159,6 +3408,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         if u.path == "/api/health":
             self._json(200, {"ok": True})
+            return
+        if u.path in ("/api/accounts/export-sso", "/api/accounts/export-credentials-csv"):
+            if not self._require_write():
+                return
+            try:
+                if u.path.endswith("export-sso"):
+                    filename, body = sso_export()
+                    content_type = "text/plain; charset=utf-8"
+                else:
+                    filename, body = credentials_csv_export()
+                    content_type = "text/csv; charset=utf-8"
+                self._send(
+                    200,
+                    body,
+                    content_type,
+                    {"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
+            except LookupError as exc:
+                self._json(404, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/account-login":
+            if not self._require_write():
+                return
+            try:
+                self._json(200, account_login_status())
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
             return
         if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains"):
             if not self._require_read():
@@ -3262,6 +3540,43 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, stop_recovery())
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
+            return
+        if u.path == "/api/account-login/import":
+            try:
+                result = import_accounts(body.get("accounts"))
+                self._json(200 if result.get("ok") else 409, result)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/account-login/start":
+            try:
+                with START_LOCK:
+                    result = start_account_login(
+                        body.get("ids"),
+                        concurrency=body.get("concurrency") or 1,
+                        extract_cpa=body.get("extract_cpa") is True,
+                        pending_only=(body.get("scope") == "pending"),
+                    )
+                self._json(202 if result.get("ok") else 409, result)
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/account-login/stop":
+            try:
+                self._json(200, stop_account_login())
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/account-login/delete":
+            try:
+                result = delete_imported_accounts(body.get("ids"))
+                self._json(200 if result.get("ok") else 409, result)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
             return
         if u.path == "/api/proxies/import":
             try:

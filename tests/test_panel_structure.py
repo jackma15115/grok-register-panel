@@ -156,6 +156,9 @@ def test_email_service_and_domain_rotation_panel_structure():
     assert 'function toggleEmailProviderSecret(' in mon
     assert '/api/email-provider' in mon
     assert '/api/email-provider/test' in mon
+    assert 'TI Temp Mail' in html
+    assert 'id="mail-tail"' in html
+    assert 'mail_tail' in mon
     assert 'Apple Mail API' not in html
     assert 'id="domain-advanced"' in html
     assert '域名轮换 <span class="domain-advanced-meta">高级设置</span>' in html
@@ -190,11 +193,47 @@ def test_panel_security_and_recovery_structure():
     assert 'id="recovery-pending"' in html
     assert 'id="recovery-accounts"' in html
     assert 'id="recovery-stop"' in html
+    assert 'id="export-sso"' in html
+    assert 'id="export-credentials"' in html
+    assert 'function downloadAccountExport(path)' in mon
+    assert '/api/accounts/export-sso' in mon
+    assert '/api/accounts/export-credentials-csv' in mon
     assert 'id="run-status" aria-label="任务状态：加载中"' in html
     assert 'setAttribute("aria-label", "任务状态：" + runLabel)' in mon
     assert 'id="kpis" aria-label="核心指标" aria-live=' not in html
     assert 'if u.path == "/favicon.ico":' in mon
     assert 'def version_string(self):' in mon
+
+
+def test_registration_count_is_a_success_target():
+    worker = (ROOT / 'grok_register_ttk.py').read_text(encoding='utf-8')
+    monitor = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    assert '目标成功数' in worker
+    assert 'done = int(self.success_count)' in worker
+    assert worker.count('mark_slot_completed()') == 2
+    assert '单批目标成功数' in monitor
+
+def test_imported_account_login_panel_structure():
+    mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    html = mon.split('HTML = r"""', 1)[1].split('"""', 1)[0]
+    assert 'id="account-login-title"' in html
+    assert 'id="account-login-input"' in html
+    assert 'id="account-login-concurrency"' in html
+    assert 'id="account-login-cpa"' in html
+    assert 'id="account-login-start-selected"' in html
+    assert 'id="account-login-start-pending"' in html
+    assert 'id="account-login-stop"' in html
+    assert 'id="account-login-body"' in html
+    assert 'function refreshAccountLogin(' in mon
+    assert 'function importAccountLoginInput(' in mon
+    assert 'function startAccountLogin(' in mon
+    assert '/api/account-login/import' in mon
+    assert '/api/account-login/start' in mon
+    assert '/api/account-login/stop' in mon
+    assert '/api/account-login/delete' in mon
+    assert 'if u.path == "/api/account-login":' in mon
+    assert mon.index('if u.path == "/api/account-login":') < mon.index('if u.path in ("/api/status"')
+
 
 if __name__ == '__main__':
     test_workers_dom_ids_unique()
@@ -210,4 +249,6 @@ if __name__ == '__main__':
     test_proxy_pool_panel_structure()
     test_email_service_and_domain_rotation_panel_structure()
     test_panel_security_and_recovery_structure()
+    test_registration_count_is_a_success_target()
+    test_imported_account_login_panel_structure()
     print('OK structure')

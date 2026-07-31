@@ -86,7 +86,12 @@ DEFAULT_UA = (
 # consent 提交用的 Next.js Server Action ID（bootstrap；失效时扫 JS / 读本地缓存）
 # 2026-07 实测：401b73e22a5e... 已 404；成功 ID 会写入 .next_action_id.cache 供下次快速路径
 NEXT_ACTION_ID = "401b73e22a5e68737d0037e1aa449fef82cd1b35fb"
-_NEXT_ACTION_CACHE_PATH = Path(__file__).resolve().parent / ".next_action_id.cache"
+_NEXT_ACTION_CACHE_PATH = Path(
+    os.environ.get(
+        "NEXT_ACTION_CACHE_FILE",
+        str(Path(__file__).resolve().parent / ".next_action_id.cache"),
+    )
+)
 _NEXT_ACTION_ID_RE = re.compile(r"^[0-9a-f]{40,44}$", re.I)
 _working_next_action_id = ""  # 启动时由 _load_working_next_action_id() 填充
 _NEXT_ACTION_RE = re.compile(

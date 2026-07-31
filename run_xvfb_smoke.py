@@ -17,7 +17,9 @@ connectivity.has_blocking_xai_failure = lambda results: False
 count = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 workers = int(sys.argv[2]) if len(sys.argv) > 2 else int(os.environ.get("REGISTER_WORKERS", "2") or 2)
 workers = max(1, min(workers, 8, count))
-cfg_path = ROOT / "config.json"
+cfg_path = Path(
+    os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
+)
 cfg = json.loads(cfg_path.read_text())
 cfg["register_count"] = count
 cfg["register_workers"] = workers

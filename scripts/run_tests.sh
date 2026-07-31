@@ -15,12 +15,19 @@ tests=(
   tests/test_proxy_store.py
   tests/test_proxy_worker_integration.py
   tests/test_email_provider_store.py
+  tests/test_ti_temp_mail.py
   tests/test_email_domain_store.py
   tests/test_email_domain_worker_integration.py
   tests/test_panel_structure.py
   tests/test_no_live_hardcode.py
   tests/test_batch_chdir_import.py
   tests/test_batch_supervisor.py
+  tests/test_account_exports.py
+  tests/test_account_login_store.py
+  tests/test_account_login_flow.py
+  tests/test_account_login_worker.py
+  tests/test_account_login_ops.py
+  tests/test_docker_assets.py
 )
 
 for test_file in "${tests[@]}"; do
@@ -38,7 +45,9 @@ done
   batch_supervisor.py \
   run_batch_headless.py \
   run_until_100.py \
-  sso_to_auth_json.py
+  sso_to_auth_json.py \
+  account_login_flow.py \
+  account_login_worker.py
 
 bash -n scripts/*.sh
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then

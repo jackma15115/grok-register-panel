@@ -37,6 +37,7 @@ from email_providers import cloudmail as cloudmail_provider
 from email_providers import duckmail as duckmail_provider
 from email_providers import mailnest as mailnest_provider
 from email_providers import moemail as moemail_provider
+from email_providers import ti_temp_mail as ti_temp_mail_provider
 from email_providers import yyds as yyds_provider
 from email_providers.common import extract_verification_code as _extract_code
 from email_providers.common import generate_username as _generate_username
@@ -105,7 +106,9 @@ from register_flow import (
 
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(APP_DIR, "config.json")
+CONFIG_FILE = os.path.abspath(
+    os.environ.get("GROK_REGISTER_CONFIG_FILE", os.path.join(APP_DIR, "config.json"))
+)
 # 注册产物目录（账号 / 邮箱凭证 / 待重转 SSO），避免堆在项目根目录
 ACCOUNTS_DIR = os.path.join(APP_DIR, "accounts")
 MEMORY_CLEANUP_INTERVAL = 5
@@ -229,6 +232,10 @@ DEFAULT_CONFIG = {
     "moemail_api_key": "",
     "moemail_domain": "",
     "moemail_expiry_ms": moemail_provider.DEFAULT_EXPIRY_MS,
+    "ti_temp_mail_base_url": ti_temp_mail_provider.DEFAULT_BASE_URL,
+    "ti_temp_mail_api_key": "",
+    "ti_temp_mail_domain": "",
+    "ti_temp_mail_mode": "maindomain",
     # 账号间注册间隔（秒），0=不等待。填一个整数=N秒固定等待，填区间"60-120"=随机等待
     "account_interval": "60-120",
 }
@@ -1415,6 +1422,97 @@ def get_moemail_expiry_ms():
     return value if value in allowed else moemail_provider.DEFAULT_EXPIRY_MS
 
 
+def get_ti_temp_mail_base_url():
+    return ti_temp_mail_provider.normalize_base(
+        str(
+            os.environ.get("TI_TEMP_MAIL_BASE_URL")
+            or config.get("ti_temp_mail_base_url")
+            or ti_temp_mail_provider.DEFAULT_BASE_URL
+        )
+    )
+
+
+def get_ti_temp_mail_api_key():
+    return str(
+        os.environ.get("TI_TEMP_MAIL_API_KEY")
+        or config.get("ti_temp_mail_api_key", "")
+        or ""
+    ).strip()
+
+
+def get_ti_temp_mail_domain():
+    return str(
+        os.environ.get("TI_TEMP_MAIL_DOMAIN")
+        or config.get("ti_temp_mail_domain", "")
+        or ""
+    ).strip()
+
+
+def get_ti_temp_mail_mode():
+    return ti_temp_mail_provider.normalize_mode(
+        str(
+            os.environ.get("TI_TEMP_MAIL_MODE")
+            or config.get("ti_temp_mail_mode", "maindomain")
+            or "maindomain"
+        )
+    )
+
+
+def ti_temp_mail_get_email_and_token(domain=""):
+    domain_pool = str(domain or "").strip() or get_ti_temp_mail_domain()
+    mode = get_ti_temp_mail_mode()
+    base = get_ti_temp_mail_base_url()
+    print(
+        f"[TI Temp Mail] 创建邮箱：base={base} mode={mode} "
+        f"domain_pool={'configured' if domain_pool else 'auto'} "
+        f"create_auth={'set' if get_ti_temp_mail_api_key() else 'unset'}",
+        flush=True,
+    )
+    try:
+        address, token = ti_temp_mail_provider.create_mailbox(
+            http_post,
+            base,
+            get_ti_temp_mail_api_key(),
+            domain=domain_pool,
+            mailbox_mode=mode,
+        )
+    except Exception as exc:
+        print(
+            f"[TI Temp Mail] 创建邮箱失败：{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        raise
+    print(
+        f"[TI Temp Mail] 邮箱已创建：address={address} mode={mode} mailbox_token=set",
+        flush=True,
+    )
+    return address, token
+
+
+def ti_temp_mail_get_oai_code(
+    mailbox_token,
+    email,
+    timeout=180,
+    poll_interval=3,
+    log_callback=None,
+    cancel_callback=None,
+    resend_callback=None,
+):
+    return ti_temp_mail_provider.wait_for_code(
+        http_get,
+        get_ti_temp_mail_base_url(),
+        mailbox_token,
+        email,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        raise_if_cancelled=raise_if_cancelled,
+        sleep_with_cancel=sleep_with_cancel,
+        log_callback=log_callback,
+        cancel_callback=cancel_callback,
+        resend_callback=resend_callback,
+    )
+
+
 def moemail_get_email_and_token(domain=""):
     # MoeMail owns its domain list. Do not reuse defaultDomains from another provider.
     return moemail_provider.create_mailbox(
@@ -1545,6 +1643,8 @@ def get_email_and_token(api_key=None):
         return cloudmail_get_email_and_token(domain=managed_domain)
     if provider == "moemail":
         return moemail_get_email_and_token(domain=managed_domain)
+    if provider == "ti-temp-mail":
+        return ti_temp_mail_get_email_and_token(domain=managed_domain)
     if provider == "cloudflare":
         api_base = get_cloudflare_api_base()
         if not api_base:
@@ -1611,6 +1711,16 @@ def get_oai_code(
         )
     if provider == "moemail":
         return moemail_get_oai_code(
+            dev_token,
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            resend_callback=resend_callback,
+        )
+    if provider == "ti-temp-mail":
+        return ti_temp_mail_get_oai_code(
             dev_token,
             email,
             timeout=timeout,
@@ -2340,12 +2450,12 @@ class GrokRegisterGUI:
         self.email_provider_combo = tk_option_menu(
             config_frame,
             self.email_provider_var,
-            ["duckmail", "yyds", "cloudflare", "mailnest", "cloudmail", "moemail"],
+            ["duckmail", "yyds", "cloudflare", "mailnest", "cloudmail", "moemail", "ti-temp-mail"],
             width=12,
         )
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
 
-        add_label(0, 2, "注册数量:")
+        add_label(0, 2, "目标成功数:")
         self.count_var = tk.StringVar(value=str(config.get("register_count", 1)))
         self.count_spinbox = tk.Spinbox(
             config_frame,
@@ -2598,6 +2708,59 @@ class GrokRegisterGUI:
             ),
         ]
 
+        # TI Temp Mail
+        self.ti_temp_mail_base_url_var = tk.StringVar(
+            value=str(
+                config.get("ti_temp_mail_base_url")
+                or ti_temp_mail_provider.DEFAULT_BASE_URL
+            )
+        )
+        self.ti_temp_mail_api_key_var = tk.StringVar(
+            value=str(config.get("ti_temp_mail_api_key", "") or "")
+        )
+        self.ti_temp_mail_domain_var = tk.StringVar(
+            value=str(config.get("ti_temp_mail_domain", "") or "")
+        )
+        self.ti_temp_mail_mode_var = tk.StringVar(
+            value=ti_temp_mail_provider.normalize_mode(
+                str(config.get("ti_temp_mail_mode", "maindomain") or "maindomain")
+            )
+        )
+        self._ti_temp_mail_widgets = [
+            p_label(0, 0, "站点 URL:"),
+            p_field(
+                tk_entry(self.provider_frame, textvariable=self.ti_temp_mail_base_url_var, width=52),
+                0,
+                1,
+                columnspan=3,
+            ),
+            p_label(1, 0, "创建 Token（可选）:"),
+            p_field(
+                tk_entry(self.provider_frame, textvariable=self.ti_temp_mail_api_key_var, width=34, show="*"),
+                1,
+                1,
+            ),
+            p_label(1, 2, "邮箱模式:"),
+            p_field(
+                tk_option_menu(
+                    self.provider_frame,
+                    self.ti_temp_mail_mode_var,
+                    ["maindomain", "subdomain"],
+                    width=14,
+                ),
+                1,
+                3,
+                sticky=tk.W,
+            ),
+            p_label(2, 0, "邮箱域名池（可选）:"),
+            p_field(
+                tk_entry(self.provider_frame, textvariable=self.ti_temp_mail_domain_var, width=52),
+                2,
+                1,
+                columnspan=3,
+            ),
+        ]
+
         self._provider_widget_groups = {
             "duckmail": self._duckmail_widgets,
             "cloudflare": self._cloudflare_widgets,
@@ -2605,6 +2768,7 @@ class GrokRegisterGUI:
             "mailnest": self._mailnest_widgets,
             "cloudmail": self._cloudmail_widgets,
             "moemail": self._moemail_widgets,
+            "ti-temp-mail": self._ti_temp_mail_widgets,
         }
 
         add_label(3, 0, "并发数（可选）:")
@@ -2781,6 +2945,7 @@ class GrokRegisterGUI:
             "mailnest": "MailNest 配置",
             "cloudmail": "CloudMail 配置",
             "moemail": "MoeMail 配置",
+            "ti-temp-mail": "TI Temp Mail 配置",
         }
         self.provider_frame.configure(text=titles.get(provider, "邮箱服务商配置"))
         for widgets in self._provider_widget_groups.values():
@@ -2828,7 +2993,7 @@ class GrokRegisterGUI:
 
     def _update_progress(self):
         total = max(int(getattr(self, "batch_count", 0) or 0), 1)
-        done = int(self.success_count) + int(self.fail_count)
+        done = int(self.success_count)
         pct = min(100.0, 100.0 * done / total)
         if hasattr(self, "progress_var"):
             self.progress_var.set(pct)
@@ -2873,6 +3038,12 @@ class GrokRegisterGUI:
             config["moemail_expiry_ms"] = int(
                 self.moemail_expiry_ms_var.get().strip()
                 or moemail_provider.DEFAULT_EXPIRY_MS
+            )
+            config["ti_temp_mail_base_url"] = self.ti_temp_mail_base_url_var.get().strip()
+            config["ti_temp_mail_api_key"] = self.ti_temp_mail_api_key_var.get().strip()
+            config["ti_temp_mail_domain"] = self.ti_temp_mail_domain_var.get().strip()
+            config["ti_temp_mail_mode"] = ti_temp_mail_provider.normalize_mode(
+                self.ti_temp_mail_mode_var.get()
             )
             config["cpa_auto_add"] = bool(self.cpa_auto_add_var.get())
             _mode_text = str(self.cpa_token_mode_var.get()).strip()
@@ -2990,6 +3161,12 @@ class GrokRegisterGUI:
             )
         except ValueError:
             config["moemail_expiry_ms"] = moemail_provider.DEFAULT_EXPIRY_MS
+        config["ti_temp_mail_base_url"] = self.ti_temp_mail_base_url_var.get().strip()
+        config["ti_temp_mail_api_key"] = self.ti_temp_mail_api_key_var.get().strip()
+        config["ti_temp_mail_domain"] = self.ti_temp_mail_domain_var.get().strip()
+        config["ti_temp_mail_mode"] = ti_temp_mail_provider.normalize_mode(
+            self.ti_temp_mail_mode_var.get()
+        )
         config["cpa_auto_add"] = bool(self.cpa_auto_add_var.get())
         _mode_text = str(self.cpa_token_mode_var.get()).strip()
         if "协议" in _mode_text:
@@ -3040,13 +3217,16 @@ class GrokRegisterGUI:
             if missing:
                 self.log(f"[!] CloudMail 模式缺少配置: {', '.join(missing)}")
                 return
+        if config["email_provider"] == "ti-temp-mail" and not get_ti_temp_mail_base_url():
+            self.log("[!] TI Temp Mail 模式需要先填写站点 URL")
+            return
         if config.get("cpa_auto_add") and not config.get("cpa_auth_dir") and not config.get("cpa_remote_url") and not config.get("grok2api_auth_dir"):
             self.log("[!] 已开启 SSO→auth，但未配置 CPA auth 目录 / 远程地址 / Grok2API 目录")
             return
         try:
             count = int(self.count_var.get())
         except Exception:
-            self.log("[!] 注册数量无效")
+            self.log("[!] 目标成功数无效")
             return
         try:
             workers = int(self.workers_var.get())
@@ -3095,11 +3275,11 @@ class GrokRegisterGUI:
         _interval_raw = str(config.get("account_interval", "0") or "0").strip()
         _interval_info = f" | 账号间隔: {_interval_raw}s" if _interval_raw and _interval_raw != "0" else ""
         self.log(
-            f"[*] 配置已保存，开始执行。目标数量: {count} | 并发: {workers}{_interval_info}"
+                f"[*] 配置已保存，开始执行。目标成功数: {count} | 并发: {workers}{_interval_info}"
             + (" | 调试模式" if config.get("debug_mode") else "")
         )
         if int(self.workers_var.get() or 1) > count and not config.get("debug_mode"):
-            self.log(f"[*] 并发已自动调整为 {workers}（不超过注册数量）")
+            self.log(f"[*] 并发已自动调整为 {workers}（不超过目标成功数）")
         _mode_map = {"device_protocol": "协议 Device Flow", "device_browser": "浏览器 Device Flow", "auth_code": "Authorization Code"}
         _mode_label = _mode_map.get(str(config.get("cpa_token_mode", "device_protocol")), "协议 Device Flow")
         self.log(f"[*] SSO→auth: {'开' if config.get('cpa_auto_add') else '关（仅保存 SSO）'}" + (f"（{_mode_label}）" if config.get('cpa_auto_add') else ""))
@@ -3175,8 +3355,7 @@ class GrokRegisterGUI:
                 )
                 if workers > 1 and streak >= 3:
                     wlog("[!] 连续启动失败较多，建议降低并发后重试")
-                for _ in range(max(int(count or 0), 0)):
-                    self._record_failure(boot_exc)
+                self._record_failure(boot_exc)
                 self.update_stats()
                 return
             wlog("[*] 浏览器已启动")
@@ -3299,7 +3478,6 @@ class GrokRegisterGUI:
                 except EmailDomainRejected as exc:
                     kind = self._record_failure(exc)
                     retry_count_for_slot = 0
-                    i += 1
                     wlog(
                         f"[-] 邮箱域名被 xAI 拒绝 [{FAIL_LABELS.get(kind, kind)}]: "
                         f"{redact_sensitive_log_line(str(exc))}"
@@ -3319,11 +3497,9 @@ class GrokRegisterGUI:
                             f"{redact_sensitive_log_line(str(exc))}"
                         )
                         retry_count_for_slot = 0
-                        i += 1
                 except Exception as exc:
                     kind = self._record_failure(exc)
                     retry_count_for_slot = 0
-                    i += 1
                     wlog(
                         f"[-] 注册失败 [{FAIL_LABELS.get(kind, kind)}]: "
                         f"{redact_sensitive_log_line(str(exc))}"
@@ -3407,7 +3583,7 @@ def run_registration_cli(count):
     workers = max(1, min(int(config.get("register_workers", 1) or 1), 24, int(count or 1)))
     pool = load_proxy_pool()
     cli_log(
-        f"[*] 终端模式启动，目标数量: {count} | 并发: {workers} | "
+        f"[*] 终端模式启动，目标成功数: {count} | 并发: {workers} | "
         f"代理池: {len(pool)} ({_proxy_pool_source})"
     )
     _cli_interval_raw = str(config.get("account_interval", "0") or "0").strip()
@@ -3469,8 +3645,8 @@ def run_registration_cli(count):
                 try:
                     px = pick_proxy_for_worker(wid, rotate_idx)
                 except Exception as proxy_exc:
-                    local_fail = n
-                    local_fail_stats[FAIL_BROWSER] = local_fail_stats.get(FAIL_BROWSER, 0) + n
+                    local_fail = 1
+                    local_fail_stats[FAIL_BROWSER] = local_fail_stats.get(FAIL_BROWSER, 0) + 1
                     cli_log(
                         f"[W{wid+1}] [-] 没有可用代理，停止该 worker: "
                         f"{redact_sensitive_log_line(str(proxy_exc))}"
@@ -3510,9 +3686,8 @@ def run_registration_cli(count):
                             record_proxy_boot_failure(px, boot2)
                             continue
                     if not booted:
-                        local_fail = n
-                        local_fail_stats[FAIL_BROWSER] = local_fail_stats.get(FAIL_BROWSER, 0) + n
-                        mark_slot_completed(n)
+                        local_fail = 1
+                        local_fail_stats[FAIL_BROWSER] = local_fail_stats.get(FAIL_BROWSER, 0) + 1
                         cli_log(
                             f"[W{wid+1}] [-] 浏览器启动失败，{n} 个任务均记为失败: "
                             f"{redact_sensitive_log_line(str(last_boot))}"
@@ -3607,7 +3782,6 @@ def run_registration_cli(count):
                         kind = classify_failure(exc)
                         local_fail_stats[kind] = local_fail_stats.get(kind, 0) + 1
                         local_fail += 1
-                        i += 1
                         retry = 0
                         cli_log(
                             f"[W{wid+1}] [-] 域名拒绝: "
@@ -3621,20 +3795,17 @@ def run_registration_cli(count):
                             worker=f"W{wid+1}",
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                         )
-                        mark_slot_completed()
                     except AccountRetryNeeded as exc:
                         retry += 1
                         if retry > max_slot_retry:
                             kind = classify_failure(exc)
                             local_fail_stats[kind] = local_fail_stats.get(kind, 0) + 1
                             local_fail += 1
-                            i += 1
                             retry = 0
                             cli_log(
                                 f"[W{wid+1}] [-] 卡住跳过: "
                                 f"{redact_sensitive_log_line(str(exc))}"
                             )
-                            mark_slot_completed()
                     except Exception as exc:
                         msg = str(exc)
                         blank_ui = (
@@ -3679,7 +3850,6 @@ def run_registration_cli(count):
                         kind = classify_failure(exc)
                         local_fail_stats[kind] = local_fail_stats.get(kind, 0) + 1
                         local_fail += 1
-                        i += 1
                         retry = 0
                         cli_log(
                             f"[W{wid+1}] [-] 失败 [{FAIL_LABELS.get(kind, kind)}]: "
@@ -3710,7 +3880,6 @@ def run_registration_cli(count):
                                 risk=_rk,
                                 log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                             )
-                        mark_slot_completed()
                         if kind == FAIL_RISK:
                             rotate_idx += 1
                             cli_log(f"[W{wid+1}] [*] 风控拒绝，切换 sticky #{rotate_idx}")
@@ -3739,11 +3908,6 @@ def run_registration_cli(count):
                                 last_boot = boot_exc
                                 record_proxy_boot_failure(px, boot_exc)
                                 if "面板代理池没有健康且启用的代理" in str(boot_exc):
-                                    remaining = max(n - i, 0)
-                                    local_fail += remaining
-                                    local_fail_stats[FAIL_BROWSER] = (
-                                        local_fail_stats.get(FAIL_BROWSER, 0) + remaining
-                                    )
                                     cli_log(
                                         f"[W{wid+1}] [-] 健康代理已耗尽，停止该 worker: "
                                         f"{redact_sensitive_log_line(str(boot_exc))}"
@@ -3774,11 +3938,6 @@ def run_registration_cli(count):
                                             last_boot = boot2
                                             record_proxy_boot_failure(px, boot2)
                                             if "面板代理池没有健康且启用的代理" in str(boot2):
-                                                remaining = max(n - i, 0)
-                                                local_fail += remaining
-                                                local_fail_stats[FAIL_BROWSER] = (
-                                                    local_fail_stats.get(FAIL_BROWSER, 0) + remaining
-                                                )
                                                 cli_log(
                                                     f"[W{wid+1}] [-] 健康代理已耗尽，停止该 worker: "
                                                     f"{redact_sensitive_log_line(str(boot2))}"
@@ -3843,9 +4002,8 @@ def run_registration_cli(count):
                 record_proxy_boot_failure(px, boot_exc)
                 single_rotate_idx += 1
         if last_boot is not None:
-            fail_count += count
-            fail_stats[FAIL_BROWSER] = fail_stats.get(FAIL_BROWSER, 0) + count
-            mark_slot_completed(count)
+            fail_count += 1
+            fail_stats[FAIL_BROWSER] = fail_stats.get(FAIL_BROWSER, 0) + 1
             cli_log(
                 f"[-] 浏览器启动失败，{count} 个任务均记为失败: "
                 f"{redact_sensitive_log_line(str(last_boot))}"
@@ -3970,7 +4128,6 @@ def run_registration_cli(count):
             except EmailDomainRejected as exc:
                 kind = _cli_record_failure(exc)
                 retry_count_for_slot = 0
-                i += 1
                 cli_log(
                     f"[-] 邮箱域名被 xAI 拒绝 [{FAIL_LABELS.get(kind, kind)}]: "
                     f"{redact_sensitive_log_line(str(exc))}"
@@ -3984,7 +4141,6 @@ def run_registration_cli(count):
                     log_callback=cli_log,
                 )
                 cli_log("[!] 请更换邮箱提供商或域名（如 Cloudflare 自建域 / MailNest），公共临时域常被拉黑")
-                mark_slot_completed()
             except AccountRetryNeeded as exc:
                 retry_count_for_slot += 1
                 if retry_count_for_slot <= max_slot_retry:
@@ -3995,7 +4151,6 @@ def run_registration_cli(count):
                 else:
                     kind = _cli_record_failure(exc)
                     retry_count_for_slot = 0
-                    i += 1
                     cli_log(
                         f"[-] 当前账号已达到最大重试次数，跳过 [{FAIL_LABELS.get(kind, kind)}]: "
                         f"{redact_sensitive_log_line(str(exc))}"
@@ -4008,11 +4163,9 @@ def run_registration_cli(count):
                         worker="W1",
                         log_callback=cli_log,
                     )
-                    mark_slot_completed()
             except Exception as exc:
                 kind = _cli_record_failure(exc)
                 retry_count_for_slot = 0
-                i += 1
                 message = str(exc)
                 proxy_dead = any(
                     marker in message
@@ -4043,7 +4196,6 @@ def run_registration_cli(count):
                         worker="W1",
                         log_callback=cli_log,
                     )
-                mark_slot_completed()
             if controller.should_stop():
                 break
             # 每轮结束只关浏览器，不立刻再开。
@@ -4077,9 +4229,6 @@ def run_registration_cli(count):
                     f"[-] 下号没有可用代理: "
                     f"{redact_sensitive_log_line(str(proxy_exc))}"
                 )
-                remaining = max(count - i, 0)
-                fail_count += remaining
-                fail_stats[FAIL_BROWSER] = fail_stats.get(FAIL_BROWSER, 0) + remaining
                 break
     except KeyboardInterrupt:
         controller.stop()
@@ -4123,7 +4272,7 @@ def main_cli():
         config["register_workers"] = 1
         cli_log("[*] 调试模式：强制单账号，结束后不关闭浏览器")
     cli_log("[*] CLI 已加载配置")
-    cli_log(f"[*] 当前邮箱服务商: {config.get('email_provider', 'duckmail')} | 注册数量: {count}")
+    cli_log(f"[*] 当前邮箱服务商: {config.get('email_provider', 'duckmail')} | 目标成功数: {count}")
     cli_log("[*] 输入 start 后开始；按 Ctrl+C 可强制停止")
     try:
         command = input("> ").strip().lower()

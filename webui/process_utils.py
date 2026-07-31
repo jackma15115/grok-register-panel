@@ -68,6 +68,8 @@ def find_managed_processes(
 ) -> list[dict]:
     found = []
     proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return found
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue

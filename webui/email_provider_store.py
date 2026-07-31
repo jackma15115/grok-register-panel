@@ -15,7 +15,9 @@ from webui.security_utils import redact_log_line
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(
-    os.environ.get("EMAIL_PROVIDER_CONFIG_FILE", str(ROOT / "config.json"))
+    os.environ.get("EMAIL_PROVIDER_CONFIG_FILE")
+    or os.environ.get("GROK_REGISTER_CONFIG_FILE")
+    or str(ROOT / "config.json")
 )
 LOCK_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".lock")
 
@@ -26,6 +28,7 @@ PROVIDER_LABELS = {
     "mailnest": "MailNest",
     "cloudmail": "CloudMail",
     "moemail": "MoeMail",
+    "ti-temp-mail": "TI Temp Mail",
 }
 SUPPORTED_PROVIDERS = tuple(PROVIDER_LABELS)
 
@@ -155,6 +158,32 @@ FIELD_DEFINITIONS = {
             {"value": 0, "label": "永久"},
         ],
     },
+    "ti_temp_mail_base_url": {
+        "label": "站点 URL",
+        "type": "url",
+        "default": "https://keldie.cyou",
+        "placeholder": "https://keldie.cyou",
+    },
+    "ti_temp_mail_api_key": {
+        "label": "创建 Token",
+        "type": "password",
+        "secret": True,
+        "placeholder": "服务端未设置 CREATE_TOKEN 时留空",
+    },
+    "ti_temp_mail_domain": {
+        "label": "邮箱域名池",
+        "type": "domains",
+        "placeholder": "留空随机；多个域名用逗号或分号分隔",
+    },
+    "ti_temp_mail_mode": {
+        "label": "邮箱模式",
+        "type": "select",
+        "default": "maindomain",
+        "options": [
+            {"value": "maindomain", "label": "主域名"},
+            {"value": "subdomain", "label": "子域名（泛域名）"},
+        ],
+    },
 }
 
 PROVIDER_FIELDS = {
@@ -183,6 +212,12 @@ PROVIDER_FIELDS = {
         "moemail_api_key",
         "moemail_domain",
         "moemail_expiry_ms",
+    ),
+    "ti-temp-mail": (
+        "ti_temp_mail_base_url",
+        "ti_temp_mail_api_key",
+        "ti_temp_mail_domain",
+        "ti_temp_mail_mode",
     ),
 }
 
@@ -252,7 +287,7 @@ def _normalize_domains(value: object) -> str:
         return ""
     domains = []
     seen = set()
-    for part in re.split(r"[,，\s]+", text):
+    for part in re.split(r"[,;，；\s]+", text):
         if not part:
             continue
         try:
@@ -271,6 +306,8 @@ def _normalize_value(name: str, value: object):
     if field_type == "url":
         normalized = _normalize_url(value)
         return normalized or definition.get("default", "")
+    if field_type == "domains":
+        return _normalize_domains(value)
     if field_type == "domain":
         text = _string(value).lstrip("@")
         if not text:
@@ -345,6 +382,8 @@ def _is_configured(provider: str, values: dict) -> bool:
         )
     if provider == "moemail":
         return bool(values.get("moemail_api_base") and values.get("moemail_api_key"))
+    if provider == "ti-temp-mail":
+        return bool(values.get("ti_temp_mail_base_url"))
     return False
 
 

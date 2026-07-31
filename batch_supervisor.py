@@ -55,7 +55,7 @@ def initialize_progress(path: str | os.PathLike[str], target: int) -> Path:
 
 
 def mark_slot_completed(slots: int = 1) -> None:
-    """Persist completed task slots for the supervising parent process."""
+    """Persist successfully registered account slots for the supervisor."""
     raw_path = str(os.environ.get(PROGRESS_ENV, "") or "").strip()
     if not raw_path:
         return

@@ -26,6 +26,10 @@ def test_managed_domains_reach_all_supported_provider_adapters():
             "moemail_api_key",
             "yyds_api_key",
             "yyds_jwt",
+            "ti_temp_mail_base_url",
+            "ti_temp_mail_api_key",
+            "ti_temp_mail_domain",
+            "ti_temp_mail_mode",
         )
     }
     previous_functions = (
@@ -33,6 +37,7 @@ def test_managed_domains_reach_all_supported_provider_adapters():
         register.cloudmail_provider.create_mailbox,
         register.moemail_provider.create_mailbox,
         register.yyds_create_account,
+        register.ti_temp_mail_provider.create_mailbox,
     )
     observed = {}
     with tempfile.TemporaryDirectory() as temp:
@@ -49,6 +54,10 @@ def test_managed_domains_reach_all_supported_provider_adapters():
                 "moemail_api_key": "not-used-in-test",
                 "yyds_api_key": "not-used-in-test",
                 "yyds_jwt": "",
+                "ti_temp_mail_base_url": "https://ti.example.com",
+                "ti_temp_mail_api_key": "",
+                "ti_temp_mail_domain": "",
+                "ti_temp_mail_mode": "subdomain",
             }
         )
 
@@ -69,15 +78,22 @@ def test_managed_domains_reach_all_supported_provider_adapters():
             observed["yyds"] = domain
             return {"address": f"{local_part}@{domain}", "token": "yyds-token"}
 
+        def fake_ti(_post, _base, _key, *, domains=None, domain="", mailbox_mode=""):
+            observed["ti-temp-mail"] = domain
+            assert mailbox_mode == "subdomain"
+            return f"user@{domain}", "ti-token"
+
         register.cloudflare_provider.create_temp_address = fake_cloudflare
         register.cloudmail_provider.create_mailbox = fake_cloudmail
         register.moemail_provider.create_mailbox = fake_moemail
         register.yyds_create_account = fake_yyds
+        register.ti_temp_mail_provider.create_mailbox = fake_ti
         domains = {
             "cloudflare": "cf-mail.example.com",
             "cloudmail": "cloudmail.example.com",
             "moemail": "moe-mail.example.com",
             "yyds": "yyds-mail.example.com",
+            "ti-temp-mail": "ti-mail.example.com",
         }
         try:
             for provider, domain in domains.items():
@@ -93,6 +109,7 @@ def test_managed_domains_reach_all_supported_provider_adapters():
                 register.cloudmail_provider.create_mailbox,
                 register.moemail_provider.create_mailbox,
                 register.yyds_create_account,
+                register.ti_temp_mail_provider.create_mailbox,
             ) = previous_functions
             email_domain_store.STATE_PATH, email_domain_store.LOCK_PATH = previous_paths
             register.config.update(previous_config)

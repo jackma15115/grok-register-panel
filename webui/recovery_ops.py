@@ -39,7 +39,9 @@ REPORT_FILE = LOG_DIR / "recovery_report.json"
 PID_FILE = LOG_DIR / "recovery.pid"
 RECOVERY_SCRIPT = ROOT / "sso_to_auth_json.py"
 VENV_PY = ROOT / ".venv" / "bin" / "python"
-CONFIG_FILE = ROOT / "config.json"
+CONFIG_FILE = Path(
+    os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
+)
 
 
 def _parse_line(line: str) -> tuple[str, str] | None:
@@ -175,6 +177,8 @@ def start_recovery(scope: str = "pending") -> dict:
         return {"ok": False, "error": f"unknown recovery scope: {normalized_scope}"}
     if find_managed_processes(ROOT, ("run_until_100.py", "run_batch_headless.py")):
         return {"ok": False, "error": "registration task is running"}
+    if find_managed_processes(ROOT, ("account_login_worker.py",)):
+        return {"ok": False, "error": "account login task is running"}
     existing = find_managed_processes(ROOT, ("sso_to_auth_json.py",))
     if existing:
         return {"ok": False, "error": "recovery already running", "pid": existing[0]["pid"]}

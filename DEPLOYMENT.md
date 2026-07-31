@@ -1,8 +1,66 @@
 # 部署指南
 
-本文以 Linux 无头服务器为主，Python 3.10+ 可用；发布版本在 Python 3.14 环境完成验证。
+本文以 Docker Compose 为首选运行方式。镜像内置 Python、Camoufox、Xvfb 和浏览器
+运行库；源码部署保留为调试或定制场景的可选方案。
 
-## 1. 安装
+## Docker Compose（推荐）
+
+```bash
+git clone https://github.com/lij768423-svg/grok-register-panel.git
+cd grok-register-panel
+cp .env.example .env
+# 编辑 .env，至少替换 MONITOR_TOKEN
+
+docker compose up -d --build
+docker compose ps
+curl http://127.0.0.1:8787/api/health
+```
+
+生产部署要点：
+
+- `MONITOR_TOKEN` 必须使用长随机值；Compose 在缺少该变量时会拒绝启动
+- 容器内面板监听 `0.0.0.0:8787`，宿主机默认只绑定 `127.0.0.1:8787`；需要 LAN / Tailscale 访问时把 `.env` 的 `MONITOR_BIND_ADDRESS` 改成具体网卡 IP
+- 浏览器和系统依赖在构建阶段进入镜像，运行时缓存缺失才会自动补拉
+- Compose 默认使用 `linux/amd64`，让 Camoufox 在 ARM 主机上通过 Docker 模拟保持一致；确认目标版本原生支持后可覆盖 `DOCKER_PLATFORM`
+- 默认挂载 `${GROK_REGISTER_HOST_DATA_DIR:-./data/docker}` 到 `/data`
+- `/data` 包含配置、导入账号密码、SSO、CPA、Grok2API auth、日志、代理池和邮箱域名池，必须纳入私密备份
+- 保留 `shm_size: 1gb` 与 `seccomp:unconfined`，否则多浏览器并发可能不稳定
+
+首次启动会生成 `/data/config.json`。通过面板“邮箱服务”保存 TI Temp Mail 或其它
+provider 后，新任务会直接读取该持久化配置。
+
+更新：
+
+```bash
+docker compose down
+git pull
+docker compose build --pull
+docker compose up -d
+```
+
+### GitHub Actions 发布
+
+推送 `v*` 标签会触发 `.github/workflows/docker-publish.yml`，发布到
+`ghcr.io/<owner>/<repo>`：
+
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+工作流会发布完整版本、主次版本和 `latest` 标签，并附带 SBOM、provenance 和 OCI
+元数据。也可以在 GitHub Actions 页面手动运行并指定 `edge` 等镜像标签。
+
+仓库首次发布后，需要在 GitHub Packages 设置中确认镜像可见性符合部署要求。
+
+本机自行发布到其它 registry 时设置仓库名后运行：
+
+```bash
+GROK_REGISTER_IMAGE=registry.example.com/team/grok-register-panel \
+  scripts/publish_docker.sh
+```
+
+## 1. 源码安装（可选）
 
 ```bash
 git clone https://github.com/lij768423-svg/grok-register-panel.git
@@ -145,6 +203,11 @@ scripts/run_xvfb_batch.sh 10
 - 扫描全部 `accounts/*.txt`
 - 跳过本地 CPA 已存在邮箱
 - 停止正在运行的补录进程
+- 导出全部可用 SSO（包含 `sso_pending.txt`，排除风控拒绝记录）
+- 导出 `email,passwd` 两列的 UTF-8 CSV
+
+两个导出按钮和对应的 `GET /api/accounts/export-*` 接口始终要求有效的
+`Authorization: Bearer <MONITOR_TOKEN>`，没有配置 Token 时也不会开放下载。
 
 命令行：
 
@@ -156,7 +219,18 @@ scripts/run_xvfb_batch.sh 10
   --report-json log/recovery_report.json
 ```
 
-## 8. 安全边界
+## 8. 导入账号管理
+
+面板的“导入账号管理”支持粘贴 `email + password`，启动 Camoufox 登录并提取 SSO。
+Docker 会把库存保存到 `/data/accounts/imported_credentials.json`，把任务和报告保存到
+`/data/log/`。库存文件包含明文密码，必须保持 `0600`、只做加密或受控备份。
+
+开启“提取 CPA / Grok2API”时，worker 继续使用 `/data/config.json` 中的
+`cpa_auth_dir`、`cpa_remote_url` 和 `grok2api_auth_dir`。登录任务与注册、账号补录任务互斥。
+`GET /api/account-login` 与所有 `/api/account-login/*` 写接口始终要求有效
+`MONITOR_TOKEN`；响应不会包含密码或 SSO 原文。
+
+## 9. 安全边界
 
 - `/api/health` 和静态页面可匿名访问；运行数据 API 在配置 Token 后要求鉴权。
 - 不要通过公网裸露内置 HTTP 服务。公网访问应放在有 TLS 和额外身份认证的反向代理后。

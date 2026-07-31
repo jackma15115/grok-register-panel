@@ -28,12 +28,13 @@ STATE_PATH = Path(
 )
 LOCK_PATH = STATE_PATH.with_suffix(STATE_PATH.suffix + ".lock")
 
-SUPPORTED_PROVIDERS = ("cloudflare", "cloudmail", "moemail", "yyds")
+SUPPORTED_PROVIDERS = ("cloudflare", "cloudmail", "moemail", "yyds", "ti-temp-mail")
 PROVIDER_LABELS = {
     "cloudflare": "Cloudflare",
     "cloudmail": "CloudMail",
     "moemail": "MoeMail",
     "yyds": "YYDS",
+    "ti-temp-mail": "TI Temp Mail",
 }
 MAX_IMPORT_ITEMS = 500
 MAX_ACTIVE_LIMIT = 100

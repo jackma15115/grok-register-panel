@@ -1,0 +1,398 @@
+"""Private imported-account inventory for browser login jobs."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import io
+import json
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    from secure_files import atomic_write_json, exclusive_file_lock
+    from webui.security_utils import redact_log_line
+except ImportError:  # running from webui/
+    import sys
+
+    ROOT = Path(__file__).resolve().parent.parent
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from secure_files import atomic_write_json, exclusive_file_lock
+    from security_utils import redact_log_line  # type: ignore
+
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE_PATH = Path(
+    os.environ.get(
+        "ACCOUNT_LOGIN_STATE_FILE",
+        str(ROOT / "accounts" / "imported_credentials.json"),
+    )
+)
+LOCK_PATH = STATE_PATH.with_suffix(STATE_PATH.suffix + ".lock")
+
+MAX_IMPORT_ITEMS = 500
+MAX_EMAIL_LENGTH = 254
+MAX_PASSWORD_LENGTH = 1024
+ALLOWED_STATUSES = {
+    "pending",
+    "queued",
+    "running",
+    "success",
+    "sso_only",
+    "failed",
+    "cancelled",
+}
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+class AccountImportError(ValueError):
+    pass
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _account_id(email: str) -> str:
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()[:20]
+
+
+def _clean_text(value: object, limit: int = 240) -> str:
+    text = redact_log_line(str(value or ""))
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()[:limit]
+
+
+def _normalize_email(value: object) -> str:
+    email = str(value or "").strip().lower()
+    if not email or len(email) > MAX_EMAIL_LENGTH or not _EMAIL_RE.fullmatch(email):
+        raise AccountImportError("invalid email address")
+    return email
+
+
+def _normalize_password(value: object) -> str:
+    password = str(value or "").strip()
+    if not password:
+        raise AccountImportError("password is empty")
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise AccountImportError("password is too long")
+    if "\x00" in password or "\r" in password or "\n" in password:
+        raise AccountImportError("password contains unsupported control characters")
+    return password
+
+
+def _parse_csv_with_header(lines: list[str]) -> list[tuple[str, str]] | None:
+    if not lines or "," not in lines[0]:
+        return None
+    rows = list(csv.reader(io.StringIO("\n".join(lines))))
+    if not rows:
+        return None
+    header = [str(value or "").strip().lower() for value in rows[0]]
+    try:
+        email_index = header.index("email")
+    except ValueError:
+        return None
+    password_index = next(
+        (header.index(name) for name in ("password", "passwd") if name in header),
+        None,
+    )
+    if password_index is None:
+        return None
+    parsed = []
+    for row in rows[1:]:
+        if not row or not any(str(value or "").strip() for value in row):
+            continue
+        if max(email_index, password_index) >= len(row):
+            raise AccountImportError("CSV row is missing email or password")
+        parsed.append((row[email_index], row[password_index]))
+    return parsed
+
+
+def parse_account_credentials(text: object) -> list[tuple[str, str]]:
+    raw = str(text or "")
+    lines = [line for line in raw.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    if not lines:
+        raise AccountImportError("no account credentials found")
+
+    candidates = _parse_csv_with_header(lines)
+    if candidates is None:
+        candidates = []
+        for line_number, line in enumerate(lines, 1):
+            value = line.strip()
+            if "----" in value:
+                email, password = value.split("----", 1)
+            elif "\t" in value:
+                email, password = value.split("\t", 1)
+            elif "," in value:
+                row = next(csv.reader([value]))
+                if len(row) != 2:
+                    raise AccountImportError(f"line {line_number}: expected email,password")
+                email, password = row
+            elif ":" in value:
+                email, password = value.split(":", 1)
+            else:
+                raise AccountImportError(f"line {line_number}: unsupported account format")
+            candidates.append((email, password))
+
+    if len(candidates) > MAX_IMPORT_ITEMS:
+        raise AccountImportError(f"at most {MAX_IMPORT_ITEMS} accounts can be imported at once")
+
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index, (email_value, password_value) in enumerate(candidates, 1):
+        try:
+            email = _normalize_email(email_value)
+            password = _normalize_password(password_value)
+        except AccountImportError as exc:
+            raise AccountImportError(f"row {index}: {exc}") from exc
+        if email in seen:
+            result = [item for item in result if item[0] != email]
+        seen.add(email)
+        result.append((email, password))
+    if not result:
+        raise AccountImportError("no account credentials found")
+    return result
+
+
+def _default_state() -> dict:
+    return {"version": 1, "items": [], "updated_at": _utc_now()}
+
+
+def _normalize_item(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        email = _normalize_email(raw.get("email"))
+        password = _normalize_password(raw.get("password"))
+    except AccountImportError:
+        return None
+    status = str(raw.get("status") or "pending").strip().lower()
+    if status not in ALLOWED_STATUSES:
+        status = "pending"
+    created_at = _clean_text(raw.get("created_at"), 40) or _utc_now()
+    return {
+        "id": _account_id(email),
+        "email": email,
+        "password": password,
+        "status": status,
+        "sso": str(raw.get("sso") or "").strip(),
+        "cpa_ok": bool(raw.get("cpa_ok")),
+        "last_error": _clean_text(raw.get("last_error")),
+        "created_at": created_at,
+        "updated_at": _clean_text(raw.get("updated_at"), 40) or created_at,
+        "last_login_at": _clean_text(raw.get("last_login_at"), 40),
+    }
+
+
+def _normalize_state(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("account login state must be an object")
+    items_by_id: dict[str, dict] = {}
+    for candidate in raw.get("items") or []:
+        item = _normalize_item(candidate)
+        if item:
+            items_by_id[item["id"]] = item
+    return {
+        "version": 1,
+        "items": list(items_by_id.values()),
+        "updated_at": _clean_text(raw.get("updated_at"), 40) or _utc_now(),
+    }
+
+
+def _read_unlocked() -> dict:
+    if not STATE_PATH.is_file():
+        return _default_state()
+    try:
+        return _normalize_state(json.loads(STATE_PATH.read_text(encoding="utf-8") or "{}"))
+    except Exception as exc:
+        raise ValueError("imported account state cannot be read; refusing to overwrite it") from exc
+
+
+def _write_unlocked(state: dict) -> None:
+    state["updated_at"] = _utc_now()
+    atomic_write_json(STATE_PATH, _normalize_state(state))
+
+
+def _public_item(item: dict) -> dict:
+    return {
+        "id": item["id"],
+        "email": item["email"],
+        "status": item["status"],
+        "has_password": bool(item.get("password")),
+        "has_sso": bool(item.get("sso")),
+        "cpa_ok": bool(item.get("cpa_ok")),
+        "last_error": item.get("last_error") or "",
+        "created_at": item.get("created_at") or "",
+        "updated_at": item.get("updated_at") or "",
+        "last_login_at": item.get("last_login_at") or "",
+    }
+
+
+def read_account_inventory() -> dict:
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+    items = sorted((_public_item(item) for item in state["items"]), key=lambda item: item["email"])
+    summary = {
+        "total": len(items),
+        "pending": sum(1 for item in items if item["status"] in {"pending", "cancelled"}),
+        "queued": sum(1 for item in items if item["status"] == "queued"),
+        "running": sum(1 for item in items if item["status"] == "running"),
+        "sso_success": sum(1 for item in items if item["has_sso"]),
+        "cpa_success": sum(1 for item in items if item["cpa_ok"]),
+        "failed": sum(1 for item in items if item["status"] == "failed"),
+    }
+    return {"ok": True, "items": items, "summary": summary, "updated_at": state["updated_at"]}
+
+
+def import_account_credentials(text: object) -> dict:
+    records = parse_account_credentials(text)
+    now = _utc_now()
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+        by_id = {item["id"]: item for item in state["items"]}
+        added = 0
+        updated = 0
+        unchanged = 0
+        for email, password in records:
+            item_id = _account_id(email)
+            existing = by_id.get(item_id)
+            if existing is None:
+                by_id[item_id] = {
+                    "id": item_id,
+                    "email": email,
+                    "password": password,
+                    "status": "pending",
+                    "sso": "",
+                    "cpa_ok": False,
+                    "last_error": "",
+                    "created_at": now,
+                    "updated_at": now,
+                    "last_login_at": "",
+                }
+                added += 1
+            elif existing["password"] != password:
+                existing.update(
+                    {
+                        "password": password,
+                        "status": "pending",
+                        "sso": "",
+                        "cpa_ok": False,
+                        "last_error": "",
+                        "updated_at": now,
+                    }
+                )
+                updated += 1
+            else:
+                unchanged += 1
+        state["items"] = list(by_id.values())
+        _write_unlocked(state)
+    return {
+        "ok": True,
+        "input_count": len(records),
+        "added": added,
+        "updated": updated,
+        "unchanged": unchanged,
+        "inventory": read_account_inventory(),
+    }
+
+
+def private_accounts(ids: object = None, *, pending_only: bool = False, include_sso_only: bool = False) -> list[dict]:
+    requested = {str(value or "").strip() for value in (ids or []) if str(value or "").strip()}
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+    result = []
+    for item in state["items"]:
+        if requested and item["id"] not in requested:
+            continue
+        if pending_only:
+            allowed = {"pending", "failed", "cancelled"}
+            if include_sso_only:
+                allowed.add("sso_only")
+            if item["status"] not in allowed:
+                continue
+        result.append(dict(item))
+    return result
+
+
+def update_account(account_id: str, **updates: object) -> dict | None:
+    allowed = {"status", "sso", "cpa_ok", "last_error", "last_login_at"}
+    now = _utc_now()
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+        found = None
+        for item in state["items"]:
+            if item["id"] != str(account_id or ""):
+                continue
+            for key, value in updates.items():
+                if key not in allowed:
+                    continue
+                if key == "status":
+                    status = str(value or "").strip().lower()
+                    if status not in ALLOWED_STATUSES:
+                        raise ValueError(f"invalid account status: {status}")
+                    item[key] = status
+                elif key == "cpa_ok":
+                    item[key] = bool(value)
+                elif key == "last_error":
+                    item[key] = _clean_text(value)
+                else:
+                    item[key] = str(value or "").strip()
+            item["updated_at"] = now
+            found = dict(item)
+            break
+        if found is None:
+            return None
+        _write_unlocked(state)
+    return found
+
+
+def mark_accounts_queued(ids: list[str]) -> int:
+    requested = {str(value or "").strip() for value in ids if str(value or "").strip()}
+    now = _utc_now()
+    changed = 0
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+        for item in state["items"]:
+            if item["id"] not in requested:
+                continue
+            item["status"] = "queued"
+            item["last_error"] = ""
+            item["updated_at"] = now
+            changed += 1
+        if changed:
+            _write_unlocked(state)
+    return changed
+
+
+def reset_incomplete_accounts() -> int:
+    now = _utc_now()
+    changed = 0
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+        for item in state["items"]:
+            if item["status"] not in {"queued", "running"}:
+                continue
+            item["status"] = "pending"
+            item["last_error"] = "previous login job was interrupted"
+            item["updated_at"] = now
+            changed += 1
+        if changed:
+            _write_unlocked(state)
+    return changed
+
+
+def delete_accounts(ids: object) -> dict:
+    requested = {str(value or "").strip() for value in (ids or []) if str(value or "").strip()}
+    if not requested:
+        raise AccountImportError("no account ids selected")
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+        before = len(state["items"])
+        state["items"] = [item for item in state["items"] if item["id"] not in requested]
+        deleted = before - len(state["items"])
+        if deleted:
+            _write_unlocked(state)
+    return {"ok": True, "deleted": deleted, "inventory": read_account_inventory()}

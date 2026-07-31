@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from webui import monitor
+from webui import account_login_store
 from webui import email_domain_store
 from webui import email_provider_store
 from webui import proxy_store
@@ -388,10 +389,66 @@ def test_non_loopback_requires_token():
     assert "MONITOR_TOKEN is required" in (result.stdout + result.stderr)
 
 
+def test_account_login_api_requires_write_auth_and_hides_secrets():
+    token = "test-account-login-token-123456"
+    password = "private-import-password-99"
+    previous_token = os.environ.get("MONITOR_TOKEN")
+    previous_paths = account_login_store.STATE_PATH, account_login_store.LOCK_PATH
+    with tempfile.TemporaryDirectory() as temp:
+        account_login_store.STATE_PATH = Path(temp) / "accounts" / "imported_credentials.json"
+        account_login_store.LOCK_PATH = Path(temp) / "accounts" / "imported_credentials.json.lock"
+        os.environ["MONITOR_TOKEN"] = token
+        server = monitor.ThreadingHTTPServer(("127.0.0.1", 0), monitor.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            payload = json.dumps(
+                {"accounts": f"person@example.test----{password}"}
+            ).encode("utf-8")
+            status, _, _ = request(
+                base + "/api/account-login/import",
+                method="POST",
+                body=payload,
+            )
+            assert status == 401
+
+            status, _, body = request(
+                base + "/api/account-login/import",
+                token=token,
+                method="POST",
+                body=payload,
+            )
+            assert status == 200
+            assert json.loads(body)["added"] == 1
+
+            status, _, _ = request(base + "/api/account-login")
+            assert status == 401
+            status, _, body = request(base + "/api/account-login", token=token)
+            assert status == 200
+            text = body.decode("utf-8")
+            data = json.loads(text)
+            assert data["items"][0]["email"] == "person@example.test"
+            assert data["items"][0]["has_password"] is True
+            assert password not in text
+            assert "\"password\"" not in text
+            assert "\"sso\"" not in text
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            account_login_store.STATE_PATH, account_login_store.LOCK_PATH = previous_paths
+            if previous_token is None:
+                os.environ.pop("MONITOR_TOKEN", None)
+            else:
+                os.environ["MONITOR_TOKEN"] = previous_token
+
+
 if __name__ == "__main__":
     test_monitor_http_auth_and_headers()
     test_proxy_api_auth_mutations_and_redaction()
     test_email_domain_api_auth_and_mutations()
     test_email_provider_api_auth_secret_masking_and_probe()
+    test_account_login_api_requires_write_auth_and_hides_secrets()
     test_non_loopback_requires_token()
     print("OK monitor http")

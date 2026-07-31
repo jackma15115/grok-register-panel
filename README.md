@@ -30,9 +30,11 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
 | **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率和账号补录；操作 API 需 `MONITOR_TOKEN` |
+| 导入账号登录 | 导入 `email + password`，浏览器登录 xAI 后提取 SSO，并可继续写入 CPA / Grok2API |
 | 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
 | 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
+| Docker 镜像 | Compose 一键运行；镜像内置 Camoufox、Xvfb 与浏览器依赖，`/data` 统一持久化 |
 | 安全存储 | 代理、账号、SSO、日志、auth 与运行状态默认使用 owner-only 权限 |
 
 ## 界面预览
@@ -68,13 +70,59 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 
 ## 快速开始
 
-### 环境
+### Docker Compose（推荐）
+
+镜像在构建时已经下载 Camoufox，不需要在宿主机安装 Python、Playwright 或 Xvfb：
+
+```bash
+git clone https://github.com/lij768423-svg/grok-register-panel.git
+cd grok-register-panel
+cp .env.example .env
+# 编辑 .env，把 MONITOR_TOKEN 换成长随机串
+
+docker compose up -d --build
+docker compose logs -f panel
+```
+
+浏览器打开 `http://127.0.0.1:8787/`，在面板 Token 输入框填入 `.env` 中相同的
+`MONITOR_TOKEN`。首次启动会从 `config.example.json` 初始化
+`data/docker/config.json`，邮箱服务可直接在面板里保存和测试。
+
+容器把以下内容统一保存在宿主机 `data/docker/`：
+
+- `config.json`、`proxies.txt` 与 Next-Action 缓存
+- `accounts/`、`cpa_auth/`、`grok2api_auth/`
+- `log/` 中的运行日志、代理池、邮箱域名池和编排状态
+- `accounts/imported_credentials.json` 中的导入账号库存（含明文密码，文件权限 `0600`）
+
+停止或升级容器不会删除这些数据：
+
+```bash
+docker compose down
+git pull
+docker compose build --pull
+docker compose up -d
+```
+
+发布版本可直接使用 GHCR 镜像：
+
+```bash
+GROK_REGISTER_IMAGE=ghcr.io/jackma15115/grok-register-panel:latest \
+  docker compose pull
+GROK_REGISTER_IMAGE=ghcr.io/jackma15115/grok-register-panel:latest \
+  docker compose up -d
+```
+
+推送 `v*` Git 标签会由 GitHub Actions 自动构建并发布 `v0.2.1`、`0.2.1`、
+`0.2` 和 `latest` 等标签；也可以在 Actions 页面手动运行 “Publish Docker image”。
+
+### 源码运行环境（可选）
 
 - Python 3.10+
 - Linux 无头建议带 Xvfb；macOS 可本机 GUI/有头
 - 能访问注册页、临时邮箱 API、`auth.x.ai` 的网络
 
-### 安装
+### 源码安装
 
 ```bash
 git clone https://github.com/lij768423-svg/grok-register-panel.git
@@ -96,17 +144,21 @@ cp config.example.json config.json
 
 | 字段 | 说明 |
 |------|------|
-| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` |
+| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` |
 | `defaultDomains` | 临时邮域名（如二级 CF 域） |
 | `cloudflare_*` / `duckmail_*` 等 | 对应邮箱 API |
 | `moemail_api_base` | MoeMail 站点根 URL，例如 `https://mail.example.com` |
 | `moemail_api_key` | MoeMail OpenAPI 的 `X-API-Key` |
 | `moemail_domain` | 可选固定域名；留空时自动读取 `/api/config` 的可用域名 |
 | `moemail_expiry_ms` | `3600000` / `86400000` / `604800000` / `0`，分别为 1 小时、1 天、7 天、永久 |
+| `ti_temp_mail_base_url` | TI Temp Mail 站点根 URL，例如 `https://mail.example.com` |
+| `ti_temp_mail_api_key` | 可选创建 Token；服务端未设置 `CREATE_TOKEN` 时留空 |
+| `ti_temp_mail_domain` | 可选域名池，多个域名用逗号或分号分隔；留空时由服务端选择 |
+| `ti_temp_mail_mode` | `maindomain`（主域名）或 `subdomain`（泛域名子域名） |
 | `proxy` | 默认 HTTP 代理，如 `http://127.0.0.1:7890` |
 | `proxies.txt` | 可选的旧版多行代理文件；未配置面板代理池时继续兼容 |
 | `register_workers` | 并发浏览器数（建议先 2～3） |
-| `register_count` | 单次目标数量 |
+| `register_count` | 单次目标成功数；失败重试不占用成功名额 |
 | `cpa_auto_add` | 是否 SSO→OAuth 并写入 auth |
 | `cpa_auth_dir` | 本地 CPA 目录（`xai-*.json`） |
 | `grok2api_auth_dir` | Grok2API 风格 auth 目录 |
@@ -130,6 +182,10 @@ cp config.example.json config.json
 | `PROXY_RISK_COOLDOWN_SECONDS` | `1800` | 注册风控后的长冷却秒数 |
 | `EMAIL_PROVIDER_CONFIG_FILE` | `./config.json` | 面板邮箱服务配置文件；保存时保持 `0600` |
 | `EMAIL_DOMAIN_POOL_STATE_FILE` | `./log/email_domain_pool.json` | 邮箱域名池状态与规则，文件权限 `0600` |
+| `GROK_REGISTER_CONFIG_FILE` | `./config.json` | Docker 中为 `/data/config.json`；worker、面板和补录共用 |
+| `ACCOUNT_LOGIN_STATE_FILE` | `./accounts/imported_credentials.json` | 导入账号私密库存；Docker 中持久化到 `/data/accounts/` |
+| `NEXT_ACTION_CACHE_FILE` | `./.next_action_id.cache` | Docker 中持久化到 `/data/.next_action_id.cache` |
+| `GROK_REGISTER_BROWSER_AUTO_FETCH` | `1` | 镜像内浏览器缓存缺失时自动补拉；正常构建的镜像已预装 |
 
 生成 token 示例：
 
@@ -140,7 +196,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 
 ### 跑起来
 
-**A. Web 面板（推荐）**
+**A. 源码 Web 面板**
 
 ```bash
 export MONITOR_TOKEN='你的长随机串'   # 必设，否则点启动会 401
@@ -222,6 +278,8 @@ python grok_register_ttk.py
 | `GET /api/status` · `/api/stats` · `/api/control` · `/api/blacklist` · `/api/recovery` · `/api/proxies` · `/api/email-domains` | 配置了 Token 后必须鉴权 |
 | `POST /api/start` · `/api/stop` · `/api/control` · `/api/blacklist/reset` · `/api/recovery/*` · `/api/proxies/*` · `/api/email-domains/*` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
 | `PATCH /api/proxies/{id}` · `DELETE /api/proxies/{id}` · `PATCH/DELETE /api/email-domains/{id}` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
+| `GET /api/accounts/export-sso` · `GET /api/accounts/export-credentials-csv` | 必须 `Authorization: Bearer <MONITOR_TOKEN>`；未配置 Token 时也拒绝 |
+| `GET /api/account-login` · `POST /api/account-login/*` | 始终要求有效 Token；GET 也不允许匿名，因为会返回完整邮箱地址 |
 
 前端 `api()` 会从 Token 输入框 / `localStorage.MONITOR_TOKEN` / `window.MONITOR_TOKEN` 自动带头。
 
@@ -240,7 +298,9 @@ python grok_register_ttk.py
 
 ### 邮箱服务与高级域名轮换
 
-- 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`
+- 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`、`ti-temp-mail`
+- TI Temp Mail 支持可选创建 Token、`maindomain` / `subdomain` 模式和多域名随机选择；创建 Token 与邮箱访问 Token 分开使用
+- 邮箱服务页显示脱敏后的 TI Temp Mail 收件日志；该区域不依赖 `PANEL_INCLUDE_TAIL`，也不会展示邮箱访问 Token
 - 切换服务商时只显示该服务实际支持的字段；保存后新的注册任务读取 `config.json`
 - 已保存的 API Key、JWT 和密码不会通过接口或页面回显；密钥输入留空会保留原值，必须点“清除”并保存才会删除
 - “测试当前提供商”使用表单中的未保存内容做非破坏性连通性检查，不会改写 `config.json`
@@ -248,7 +308,7 @@ python grok_register_ttk.py
 
 域名轮换位于邮箱服务页的高级设置中：
 
-- 支持导入根域名或已有子域名，并绑定 `cloudflare`、`cloudmail`、`moemail`、`yyds` provider
+- 支持导入根域名或已有子域名，并绑定 `cloudflare`、`cloudmail`、`moemail`、`yyds`、`ti-temp-mail` provider
 - 每个 provider 可设置最大活跃域名数；超出部分待命，活跃域名停用或拉黑后自动补位
 - xAI 明确拒绝邮箱域名时累计连续失败，达到阈值后自动拉黑；成功提交邮箱后清零连续失败
 - 邮箱 API、验证码超时和普通网络异常不会处罚域名，避免把基础设施故障误判成域名质量问题
@@ -277,6 +337,9 @@ python grok_register_ttk.py
 
 - **补录待处理**：读取 `accounts/sso_pending.txt`，跳过 CPA 已存在邮箱，成功一条立即原子出队
 - **扫描全部账号**：扫描 `accounts/*.txt` 并对缺失 CPA 的记录执行转换，不删除原账号文件
+- **导出 SSO**：汇总账号文件与 `sso_pending.txt`，去重后每行导出一个 SSO；明确排除 `sso_risk_rejected.txt`
+- **导出账号 CSV**：导出 `email,passwd` 两列，使用 UTF-8 BOM 和标准 CSV 转义，便于表格软件直接打开
+- 两个导出接口始终要求匹配 `MONITOR_TOKEN`，即使普通读取接口允许匿名也不会放宽
 - 补录运行在独立子进程，面板可查看数量、上次结果和停止任务
 - 命令行等价入口：
 
@@ -287,6 +350,16 @@ python sso_to_auth_json.py \
   --consume-success \
   --report-json log/recovery_report.json
 ```
+
+### 导入账号管理
+
+- 支持 `email----password`、`email,password`、`email:password` 和 Tab 分隔；CSV 可使用 `email,password` 或 `email,passwd` 表头
+- 导入时按邮箱去重；同邮箱密码变化会清除旧 SSO / CPA 状态并重新进入待处理
+- “登录选中”只处理勾选账号；“登录待处理”会处理待处理、失败和已停止账号，开启 CPA 时也会重转已有 SSO
+- 每个账号启动独立 Camoufox 会话，沿用面板健康代理池；登录成功写入 `accounts/{email}.txt` 的 `email----password----sso` 标准格式
+- 开启“提取 CPA / Grok2API”后调用现有 SSO 转换配置；转换失败时保留 SSO，并显示为“SSO 已提取”供后续重试
+- 账号登录、批量注册和账号补录互斥，避免并发争用浏览器与 auth 输出
+- 库存文件是 owner-only 明文凭据文件；API 和表格只返回 `has_password`、`has_sso`、`cpa_ok`，不回传密码或 SSO 原文
 
 ## 工程实践备忘（非教程承诺）
 
@@ -307,6 +380,8 @@ python sso_to_auth_json.py \
 ├── register_flow.py           # 注册页流程 / Turnstile
 ├── browser_session.py         # 会话、出口探测、ASN 黑名单
 ├── sso_to_auth_json.py        # SSO → OAuth / 写 CPA（auth 文件 0600）
+├── account_login_flow.py      # xAI 邮箱密码登录 / SSO 提取
+├── account_login_worker.py    # 导入账号并发后台任务
 ├── camoufox_adapter.py
 ├── connectivity.py
 ├── run_batch_headless.py      # 无头批量（包根 Path 后 chdir）
@@ -319,6 +394,8 @@ python sso_to_auth_json.py \
 │   ├── email_domain_store.py  # 邮箱域名池、拒绝阈值与轮换状态
 │   ├── process_utils.py       # 当前项目实例的进程发现 / 停止
 │   ├── recovery_ops.py        # SSO / accounts 异步补录
+│   ├── account_login_store.py # 私密导入账号库存 / 脱敏公开视图
+│   ├── account_login_ops.py   # 导入、启动、停止和删除操作
 │   └── blacklist_ops.py       # 面板黑名单接口
 ├── email_providers/
 ├── tests/                     # 结构 / 脱敏 / chdir 冒烟

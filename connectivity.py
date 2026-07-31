@@ -234,6 +234,21 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
                 detail += f"；域名 {domains[:80]}"
             return "邮箱API", True, detail
 
+        if provider == "ti-temp-mail":
+            from email_providers import ti_temp_mail as ti_temp_mail_provider
+
+            base = ti_temp_mail_provider.normalize_base(
+                str(config.get("ti_temp_mail_base_url") or "")
+            )
+            parsed = urlparse(base)
+            host = parsed.hostname
+            if not host:
+                return "邮箱API", False, "TI Temp Mail 站点 URL 无效"
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            if not _tcp_open(host, port):
+                return "邮箱API", False, f"TI Temp Mail 服务不可达: {host}:{port}"
+            return "邮箱API", True, f"TI Temp Mail 可达 {host}:{port}"
+
         return "邮箱API", True, f"提供商 {provider} 跳过深度探测"
     except Exception as exc:
         return "邮箱API", False, redact_log_line(str(exc))
