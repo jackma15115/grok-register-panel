@@ -183,8 +183,11 @@ def _native_input_candidates(kind: str):
             score = 0
             if kind == "email":
                 score = (100 if typ == "email" else 0) + (90 if name == "email" else 0)
-                score += 80 if "email" in autocomplete else 0
-                score += 70 if "email" in testid else 0
+                score += 80 if autocomplete in ("email", "username") else 0
+                score += 70 if "email" in autocomplete or "identifier" in autocomplete else 0
+                score += 70 if "email" in testid or "identifier" in testid else 0
+                score += 60 if inputmode == "email" else 0
+                score += 50 if name in ("identifier", "login", "username") else 0
                 score += 40 if any(x in meta for x in ("email", "mail", "邮箱")) else 0
             elif kind == "code":
                 score = (100 if testid == "code" or name == "code" else 0)
@@ -204,8 +207,9 @@ def _native_input_candidates(kind: str):
                 score += 40 if "family" in meta or "姓" in meta else 0
             elif kind == "password":
                 score = 110 if typ == "password" else 0
-                score += 90 if name == "password" or "password" in autocomplete else 0
-                score += 60 if "password" in meta or "密码" in meta else 0
+                score += 100 if name in ("password", "passwd", "pass", "current_password", "currentpassword") else 0
+                score += 90 if any(x in autocomplete for x in ("password", "passwd")) else 0
+                score += 60 if any(x in meta for x in ("password", "passwd", "passcode", "密码")) else 0
             if score:
                 scored.append((score, element))
     return [element for _, element in sorted(scored, key=lambda item: item[0], reverse=True)]

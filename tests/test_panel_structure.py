@@ -226,6 +226,8 @@ def test_imported_account_login_panel_structure():
     assert 'id="account-login-start-pending"' in html
     assert 'id="account-login-stop"' in html
     assert 'id="account-login-body"' in html
+    assert 'id="account-login-tail"' in html
+    assert 'id="account-login-log-name"' in html
     assert 'function refreshAccountLogin(' in mon
     assert 'function importAccountLoginInput(' in mon
     assert 'function startAccountLogin(' in mon

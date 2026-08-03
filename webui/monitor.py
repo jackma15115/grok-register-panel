@@ -1254,6 +1254,9 @@ HTML = r"""<!DOCTYPE html>
   .account-login-table th:first-child, .account-login-table td:first-child { width: 42px; text-align: center; }
   .account-login-result { max-width: 280px; overflow-wrap: anywhere; }
   .account-login-empty { padding: 22px 10px; text-align: center; color: var(--muted); }
+  .account-login-log-head { margin-top: 14px; }
+  .account-login-log-head h3 { margin: 0; font-size: 13px; font-weight: 650; }
+  .account-login-log { min-height: 96px; max-height: 260px; }
   body.proxy-view-open { overflow: hidden; }
   body.proxy-view-open #dashboard-view > :not(#proxy-view) { display: none; }
   .proxy-view {
@@ -2215,6 +2218,11 @@ HTML = r"""<!DOCTYPE html>
         <tbody id="account-login-body"><tr><td colspan="7" class="account-login-empty">尚未导入账号</td></tr></tbody>
       </table>
     </div>
+    <div class="section-head account-login-log-head">
+      <h3>执行日志</h3>
+      <span class="section-meta mono" id="account-login-log-name">暂无日志</span>
+    </div>
+    <div class="tail mono account-login-log" id="account-login-tail">暂无登录日志</div>
   </section>
 
   <div class="three panel-gap">
@@ -3071,6 +3079,16 @@ function renderAccountLogin(data) {
       <td class="mono">${esc(accountLoginTime(item.updated_at))}</td>
     </tr>`;
   }).join("") : '<tr><td colspan="7" class="account-login-empty">尚未导入账号</td></tr>';
+  const logTail = document.getElementById("account-login-tail");
+  const logLines = Array.isArray(accountLoginData.log_tail) ? accountLoginData.log_tail : [];
+  const logText = (accountLoginData.log_tail_truncated ? "[... earlier log lines omitted ...]\n" : "")
+    + (logLines.join("\n") || "暂无登录日志");
+  const keepLogPinned = logTail.scrollHeight - logTail.scrollTop - logTail.clientHeight < 32;
+  if (logTail.textContent !== logText) {
+    logTail.textContent = logText;
+    if (keepLogPinned || accountLoginData.running) logTail.scrollTop = logTail.scrollHeight;
+  }
+  document.getElementById("account-login-log-name").textContent = accountLoginData.log_tail_name || "暂无日志";
   const running = !!accountLoginData.running;
   const selected = selectedAccountLoginIds.size;
   const allSelected = items.length > 0 && items.every(item => selectedAccountLoginIds.has(item.id));

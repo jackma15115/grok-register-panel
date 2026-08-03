@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -45,6 +47,10 @@ def test_password_login_returns_sso_without_logging_secrets():
 
     def click_action(*_args, **_kwargs):
         if state["phase"] == "email":
+            state["phase"] = "password-choice"
+        elif state["phase"] == "password-choice" and any(
+            "password" in str(value).lower() for value in (_args[0] if _args else ())
+        ):
             state["phase"] = "password"
         return "continue"
 
@@ -73,8 +79,88 @@ def test_password_login_returns_sso_without_logging_secrets():
     log_text = "\n".join(state["logs"])
     assert "private-password" not in log_text
     assert "private-sso-token" not in log_text
+    assert "Selected password sign-in" in log_text
+
+
+def test_email_verification_page_fails_with_specific_safe_diagnostic():
+    email = "person@example.test"
+    password = "private-password"
+    state = {"logs": [], "url": "https://accounts.x.ai/verify"}
+
+    class VerificationPage(FakePage):
+        def run_js(self, _script):
+            return {
+                "invalid": False,
+                "rate": False,
+                "cf": False,
+                "verification": True,
+                "url": self.state["url"],
+                "title": f"Verify {email}",
+                "ready": "complete",
+                "inputs": [{"type": "text", "name": "verification-code", "autocomplete": "one-time-code"}],
+                "actions": [f"Send code to {email}"],
+            }
+
+    page = VerificationPage(state)
+    fake_browser = SimpleNamespace(active_page=lambda: page, refresh_active_page=lambda: page)
+    fake_flow = SimpleNamespace(
+        _dismiss_cookie_consent=lambda **_kwargs: None,
+        _native_input_candidates=lambda _kind: [],
+        _native_click_action=lambda *_args, **_kwargs: "",
+        _try_sync_turnstile=lambda **_kwargs: None,
+    )
+    ticks = itertools.count(0, 1)
+    with patch.dict(sys.modules, {"browser_session": fake_browser, "register_flow": fake_flow}), patch.object(
+        account_login_flow.time, "monotonic", side_effect=lambda: next(ticks)
+    ), patch.object(account_login_flow, "_sleep", return_value=None):
+        with pytest.raises(account_login_flow.AccountLoginError, match="email verification code"):
+            account_login_flow.login_and_extract_sso(
+                email,
+                password,
+                log_callback=state["logs"].append,
+            )
+
+    log_text = "\n".join(state["logs"])
+    assert email not in log_text
+    assert password not in log_text
+    assert "verification-code" in log_text
+
+
+def test_email_form_is_retried_then_fails_with_specific_reason():
+    state = {"typed": [], "logs": []}
+    page = FakePage(state)
+    email_element = object()
+
+    def click_action(keywords, *_args, **_kwargs):
+        if any("password" in str(value).lower() for value in keywords):
+            return ""
+        return "continue"
+
+    fake_browser = SimpleNamespace(active_page=lambda: page, refresh_active_page=lambda: page)
+    fake_flow = SimpleNamespace(
+        _dismiss_cookie_consent=lambda **_kwargs: None,
+        _native_input_candidates=lambda kind: [email_element] if kind == "email" else [],
+        _native_type_element=lambda element, value: state["typed"].append((element, value)) or True,
+        _native_click_action=click_action,
+        _try_sync_turnstile=lambda **_kwargs: None,
+    )
+    ticks = itertools.count(0, 1)
+    with patch.dict(sys.modules, {"browser_session": fake_browser, "register_flow": fake_flow}), patch.object(
+        account_login_flow.time, "monotonic", side_effect=lambda: next(ticks)
+    ), patch.object(account_login_flow, "_sleep", return_value=None):
+        with pytest.raises(account_login_flow.AccountLoginError, match="did not advance past the email form"):
+            account_login_flow.login_and_extract_sso(
+                "person@example.test",
+                "private-password",
+                log_callback=state["logs"].append,
+            )
+
+    assert len(state["typed"]) == 3
+    assert any("resubmitted (3/3)" in line for line in state["logs"])
 
 
 if __name__ == "__main__":
     test_password_login_returns_sso_without_logging_secrets()
+    test_email_verification_page_fails_with_specific_safe_diagnostic()
+    test_email_form_is_retried_then_fails_with_specific_reason()
     print("OK account login flow")

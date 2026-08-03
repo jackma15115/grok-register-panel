@@ -52,18 +52,61 @@ VENV_PY = ROOT / ".venv" / "bin" / "python"
 _WATCH_LOCK = threading.Lock()
 _INTENTIONAL_STOPS: set[int] = set()
 _ACTIVE_WATCHERS: set[int] = set()
+_LOG_TAIL_BYTES = 48 * 1024
+_LOG_TAIL_LINES = 160
 
 
 def _workers() -> list[dict]:
     return find_managed_processes(ROOT, ("account_login_worker.py",))
 
 
-def _latest_log_name() -> str:
+def _latest_log_path() -> Path | None:
     try:
-        paths = sorted(LOG_DIR.glob("account-login-*.log"), key=lambda path: path.stat().st_mtime)
+        paths = sorted(
+            (
+                path
+                for path in LOG_DIR.glob("account-login-*.log")
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=lambda path: path.stat().st_mtime,
+        )
     except OSError:
-        return ""
-    return paths[-1].name[:160] if paths else ""
+        return None
+    return paths[-1] if paths else None
+
+
+def _latest_log_name() -> str:
+    path = _latest_log_path()
+    return path.name[:160] if path else ""
+
+
+def _read_latest_log_tail() -> dict:
+    path = _latest_log_path()
+    if path is None:
+        return {"name": "", "lines": [], "truncated": False}
+    try:
+        if path.resolve().parent != LOG_DIR.resolve():
+            return {"name": "", "lines": [], "truncated": False}
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            byte_truncated = size > _LOG_TAIL_BYTES
+            handle.seek(max(0, size - _LOG_TAIL_BYTES))
+            text = handle.read(_LOG_TAIL_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return {"name": path.name[:160], "lines": [], "truncated": False}
+
+    raw_lines = text.splitlines()
+    if byte_truncated and raw_lines:
+        raw_lines = raw_lines[1:]
+    line_truncated = len(raw_lines) > _LOG_TAIL_LINES
+    raw_lines = raw_lines[-_LOG_TAIL_LINES:]
+    lines = [redact_log_line(line)[:1200] for line in raw_lines]
+    return {
+        "name": path.name[:160],
+        "lines": lines,
+        "truncated": bool(byte_truncated or line_truncated),
+    }
 
 
 def _read_report() -> dict:
@@ -206,11 +249,15 @@ def account_login_status() -> dict:
     if not workers and not watcher_pids:
         reset_incomplete_accounts(_stale_job_reason())
     inventory = read_account_inventory()
+    log_tail = _read_latest_log_tail()
     return {
         **inventory,
         "running": bool(workers or watcher_pids),
         "pid": workers[0]["pid"] if workers else (watcher_pids[0] if watcher_pids else None),
         "last_report": _read_report(),
+        "log_tail": log_tail["lines"],
+        "log_tail_name": log_tail["name"],
+        "log_tail_truncated": log_tail["truncated"],
     }
 
 

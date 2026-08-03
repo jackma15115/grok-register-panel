@@ -149,10 +149,39 @@ def test_worker_exit_label_identifies_linux_oom_signal():
     assert "OOM" in label
 
 
+def test_latest_log_tail_is_bounded_and_redacted():
+    with tempfile.TemporaryDirectory() as temp:
+        previous_log_dir = ops.LOG_DIR
+        ops.LOG_DIR = Path(temp)
+        password = "private-password-99"
+        sso = "private-sso-token-99"
+        try:
+            lines = [f"ordinary line {index}" for index in range(220)]
+            lines.append(
+                f"account=person@example.test password={password} sso={sso}"
+            )
+            (ops.LOG_DIR / "account-login-test.log").write_text(
+                "\n".join(lines) + "\n",
+                encoding="utf-8",
+            )
+            result = ops._read_latest_log_tail()
+        finally:
+            ops.LOG_DIR = previous_log_dir
+
+    text = "\n".join(result["lines"])
+    assert result["name"] == "account-login-test.log"
+    assert result["truncated"] is True
+    assert len(result["lines"]) <= ops._LOG_TAIL_LINES
+    assert "pe***@example.test" in text
+    assert password not in text
+    assert sso not in text
+
+
 if __name__ == "__main__":
     test_start_rejects_registration_or_recovery_conflicts()
     test_start_writes_id_only_job_and_launches_worker()
     test_worker_watcher_persists_linux_launcher_failure()
     test_status_does_not_overwrite_error_while_watcher_is_finishing()
     test_worker_exit_label_identifies_linux_oom_signal()
+    test_latest_log_tail_is_bounded_and_redacted()
     print("OK account login ops")

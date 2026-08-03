@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from webui import monitor
+from webui import account_login_ops
 from webui import account_login_store
 from webui import email_domain_store
 from webui import email_provider_store
@@ -394,9 +395,17 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
     password = "private-import-password-99"
     previous_token = os.environ.get("MONITOR_TOKEN")
     previous_paths = account_login_store.STATE_PATH, account_login_store.LOCK_PATH
+    previous_log_dir = account_login_ops.LOG_DIR
     with tempfile.TemporaryDirectory() as temp:
         account_login_store.STATE_PATH = Path(temp) / "accounts" / "imported_credentials.json"
         account_login_store.LOCK_PATH = Path(temp) / "accounts" / "imported_credentials.json.lock"
+        account_login_ops.LOG_DIR = Path(temp) / "log"
+        account_login_ops.LOG_DIR.mkdir()
+        sso_secret = "private-sso-token-99"
+        (account_login_ops.LOG_DIR / "account-login-test.log").write_text(
+            f"person@example.test password={password} sso={sso_secret}\n",
+            encoding="utf-8",
+        )
         os.environ["MONITOR_TOKEN"] = token
         server = monitor.ThreadingHTTPServer(("127.0.0.1", 0), monitor.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -430,7 +439,10 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
             data = json.loads(text)
             assert data["items"][0]["email"] == "person@example.test"
             assert data["items"][0]["has_password"] is True
+            assert data["log_tail"]
+            assert data["log_tail_name"] == "account-login-test.log"
             assert password not in text
+            assert sso_secret not in text
             assert "\"password\"" not in text
             assert "\"sso\"" not in text
 
@@ -453,6 +465,7 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
             server.server_close()
             thread.join(timeout=5)
             account_login_store.STATE_PATH, account_login_store.LOCK_PATH = previous_paths
+            account_login_ops.LOG_DIR = previous_log_dir
             if previous_token is None:
                 os.environ.pop("MONITOR_TOKEN", None)
             else:
