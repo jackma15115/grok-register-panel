@@ -24,6 +24,7 @@ def test_worker_writes_canonical_account_file_and_cpa():
         runtime = SimpleNamespace(
             pick_proxy_for_worker=lambda *_args: "",
             set_thread_proxy=lambda _value: None,
+            clear_thread_proxy=lambda: None,
             record_proxy_boot_failure=lambda *_args: None,
             account_file_for_email=lambda _email: str(account_path),
             add_sso_to_cpa=lambda _sso, **_kwargs: True,
@@ -88,6 +89,7 @@ def test_worker_failure_logs_traceback_without_account_secrets():
     runtime = SimpleNamespace(
         pick_proxy_for_worker=lambda *_args: "",
         set_thread_proxy=lambda _value: None,
+        clear_thread_proxy=lambda: None,
         record_proxy_boot_failure=lambda *_args: None,
     )
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 from pathlib import Path
 
 
@@ -10,6 +11,7 @@ def test_docker_image_contract() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     entrypoint = (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8")
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    example_config = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
 
     assert "python:3.12-slim-bookworm" in dockerfile
     assert "python -m camoufox fetch" in dockerfile
@@ -19,6 +21,7 @@ def test_docker_image_contract() -> None:
     assert "/api/health" in dockerfile
     assert "libtk8.6" in dockerfile
     assert "import tkinter" in dockerfile
+    assert example_config["proxy"] == ""
 
     assert "MONITOR_TOKEN: \"${MONITOR_TOKEN:?" in compose
     assert "MONITOR_BIND_ADDRESS:-127.0.0.1" in compose

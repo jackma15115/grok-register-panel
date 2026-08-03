@@ -584,7 +584,12 @@ def load_proxy_pool(path: str = "") -> list:
     if managed_snapshot.get("configured"):
         with _proxy_pool_lock:
             _proxy_pool = managed
-            _proxy_pool_source = "managed" if managed else "managed-empty"
+            if managed:
+                _proxy_pool_source = "managed"
+            elif int(managed_snapshot.get("item_count") or 0) > 0:
+                _proxy_pool_source = "managed-empty"
+            else:
+                _proxy_pool_source = "managed-direct"
             return list(_proxy_pool)
 
     candidates = []
@@ -618,10 +623,23 @@ def load_proxy_pool(path: str = "") -> list:
 
 def set_thread_proxy(proxy: str):
     _proxy_tls.proxy = str(proxy or "").strip()
+    _proxy_tls.proxy_bound = True
+
+
+def clear_thread_proxy():
+    for name in ("proxy", "proxy_bound"):
+        try:
+            delattr(_proxy_tls, name)
+        except AttributeError:
+            pass
 
 
 def get_thread_proxy() -> str:
     return str(getattr(_proxy_tls, "proxy", "") or "").strip()
+
+
+def is_thread_proxy_bound() -> bool:
+    return bool(getattr(_proxy_tls, "proxy_bound", False))
 
 
 def pick_proxy_for_worker(worker_id: int, rotate_idx: int = 0) -> str:
@@ -630,6 +648,8 @@ def pick_proxy_for_worker(worker_id: int, rotate_idx: int = 0) -> str:
     if not pool:
         if _proxy_pool_source == "managed-empty":
             raise RuntimeError("面板代理池没有健康且启用的代理，请先检测或等待冷却结束")
+        if _proxy_pool_source == "managed-direct":
+            return ""
         return str(config.get("proxy", "") or "").strip()
     idx = (max(0, int(worker_id)) + max(0, int(rotate_idx))) % len(pool)
     selected = pool[idx]
@@ -641,7 +661,11 @@ def pick_proxy_for_worker(worker_id: int, rotate_idx: int = 0) -> str:
 
 
 def get_proxies():
-    proxy = get_thread_proxy() or str(config.get("proxy", "") or "").strip()
+    proxy = (
+        get_thread_proxy()
+        if is_thread_proxy_bound()
+        else str(config.get("proxy", "") or "").strip()
+    )
     if proxy:
         return {"http": proxy, "https": proxy}
     return {}
@@ -815,7 +839,9 @@ def _normalize_sso_token(raw_token):
 
 def _resolve_cpa_proxy():
     """CPA 换 token 用的代理：优先线程绑定 / config.proxy，其次环境变量，否则直连。"""
-    proxy = get_thread_proxy() or str(config.get("proxy", "") or "").strip()
+    if is_thread_proxy_bound():
+        return get_thread_proxy()
+    proxy = str(config.get("proxy", "") or "").strip()
     if proxy:
         return proxy
     for key in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):

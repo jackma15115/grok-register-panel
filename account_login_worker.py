@@ -142,7 +142,7 @@ def process_one_account(record: dict, runtime, *, worker_index: int, extract_cpa
         if browser_started:
             stop_browser(force=True)
         try:
-            runtime.set_thread_proxy("")
+            runtime.clear_thread_proxy()
         except Exception:
             pass
 

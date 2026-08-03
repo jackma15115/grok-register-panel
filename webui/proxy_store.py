@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = Path(
     os.environ.get("PROXY_POOL_STATE_FILE", str(ROOT / "log" / "proxy_pool.json"))
 )
+STATE_PATH_EXPLICIT = "PROXY_POOL_STATE_FILE" in os.environ
 LOCK_PATH = STATE_PATH.with_suffix(STATE_PATH.suffix + ".lock")
 LEGACY_PATH = Path(os.environ.get("PROXY_POOL_LEGACY_FILE", str(ROOT / "proxies.txt")))
 
@@ -506,6 +507,7 @@ def delete_proxy(proxy_id: str) -> dict:
 def worker_proxy_snapshot() -> dict:
     """Return secret worker URLs plus whether a managed pool is configured."""
     with exclusive_file_lock(LOCK_PATH):
+        state_exists = STATE_PATH.is_file()
         state, _ = _read_unlocked()
         changed = _release_expired_cooldowns(state)
         urls = [
@@ -515,7 +517,11 @@ def worker_proxy_snapshot() -> dict:
         ]
         if changed:
             _write_unlocked(state)
-    return {"configured": bool(state["items"]), "urls": urls}
+    return {
+        "configured": bool(STATE_PATH_EXPLICIT or state_exists),
+        "item_count": len(state["items"]),
+        "urls": urls,
+    }
 
 
 def list_worker_proxies() -> list[str]:

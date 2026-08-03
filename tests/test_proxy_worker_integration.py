@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import os
 import tempfile
 import sys
 from pathlib import Path
@@ -66,11 +67,52 @@ def test_worker_hot_reload_only_changes_next_account_proxy():
             assert next_account != current
             assert "b.example:8001" in next_account
         finally:
+            register.clear_thread_proxy()
             proxy_store.STATE_PATH, proxy_store.LOCK_PATH, proxy_store.LEGACY_PATH = previous_paths
             register.config["proxy"] = previous_proxy
             register.config["register_workers"] = previous_workers
 
 
+def test_empty_managed_pool_uses_direct_connection():
+    previous_paths = (
+        proxy_store.STATE_PATH,
+        proxy_store.LOCK_PATH,
+        proxy_store.LEGACY_PATH,
+    )
+    previous_proxy = register.config.get("proxy")
+    previous_https_proxy = os.environ.get("HTTPS_PROXY")
+    with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp)
+        try:
+            proxy_store.STATE_PATH = base / "log" / "proxy_pool.json"
+            proxy_store.LOCK_PATH = base / "log" / "proxy_pool.json.lock"
+            proxy_store.LEGACY_PATH = base / "proxies.txt"
+            register.config["proxy"] = "http://legacy.example:7890"
+            os.environ["HTTPS_PROXY"] = "http://environment.example:7890"
+
+            imported = proxy_store.import_proxies("proxy.example:8080")
+            proxy_store.delete_proxy(imported["imported_ids"][0])
+            snapshot = proxy_store.worker_proxy_snapshot()
+            assert snapshot["configured"] is True
+            assert snapshot["item_count"] == 0
+
+            assert register.load_proxy_pool() == []
+            selected = register.pick_proxy_for_worker(0, 0)
+            assert selected == ""
+            register.set_thread_proxy(selected)
+            assert register.get_proxies() == {}
+            assert register._resolve_cpa_proxy() == ""
+        finally:
+            register.clear_thread_proxy()
+            proxy_store.STATE_PATH, proxy_store.LOCK_PATH, proxy_store.LEGACY_PATH = previous_paths
+            register.config["proxy"] = previous_proxy
+            if previous_https_proxy is None:
+                os.environ.pop("HTTPS_PROXY", None)
+            else:
+                os.environ["HTTPS_PROXY"] = previous_https_proxy
+
+
 if __name__ == "__main__":
     test_worker_hot_reload_only_changes_next_account_proxy()
+    test_empty_managed_pool_uses_direct_connection()
     print("OK proxy worker integration")

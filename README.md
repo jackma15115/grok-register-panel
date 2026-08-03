@@ -161,8 +161,8 @@ sudo apt-get install -y libtk8.6 xvfb xauth
 | `ti_temp_mail_api_key` | 可选创建 Token；服务端未设置 `CREATE_TOKEN` 时留空 |
 | `ti_temp_mail_domain` | 可选域名池，多个域名用逗号或分号分隔；留空时由服务端选择 |
 | `ti_temp_mail_mode` | `maindomain`（主域名）或 `subdomain`（泛域名子域名） |
-| `proxy` | 默认 HTTP 代理，如 `http://127.0.0.1:7890` |
-| `proxies.txt` | 可选的旧版多行代理文件；未配置面板代理池时继续兼容 |
+| `proxy` | 可选的旧版默认 HTTP 代理；留空时直连 |
+| `proxies.txt` | 可选的旧版多行代理文件；未启用面板代理状态文件时继续兼容 |
 | `register_workers` | 并发浏览器数（建议先 2～3） |
 | `register_count` | 单次目标成功数；失败重试不占用成功名额 |
 | `cpa_auto_add` | 是否 SSO→OAuth 并写入 auth |
@@ -299,7 +299,8 @@ python grok_register_ttk.py
 - 一个账号从注册、SSO 到 OAuth 始终固定同一代理，不会中途更换出口
 - 网络异常进入短冷却，注册风控进入长冷却；邮箱域名、验证码或邮箱 API 错误不处罚代理
 - 面板池已有条目但没有健康代理时任务会明确停止，不会绕过状态回退到旧文件
-- `proxies.txt` 可从界面导入；只有面板池完全未配置时，worker 才直接兼容旧文件 / `config.proxy`
+- 面板池为零条目时 worker 明确走直连，不会回退到 `config.proxy` 或系统代理
+- `proxies.txt` 可从界面导入；只有未启用面板代理状态文件的旧部署才兼容旧文件 / `config.proxy`
 
 代理池不抓取、不分发公共代理，只管理操作者自己提供的外部代理。
 

@@ -84,7 +84,9 @@ def test_probe_result_and_runtime_cooldown_control_worker_selection():
         imported = proxy_store.import_proxies("proxy.example:8080:user:pass")
         proxy_id = imported["imported_ids"][0]
         assert proxy_store.list_worker_proxies() == []
-        assert proxy_store.worker_proxy_snapshot()["configured"] is True
+        snapshot = proxy_store.worker_proxy_snapshot()
+        assert snapshot["configured"] is True
+        assert snapshot["item_count"] == 1
 
         proxy_store._apply_probe_result(
             proxy_id,
@@ -115,6 +117,19 @@ def test_probe_result_and_runtime_cooldown_control_worker_selection():
         assert item["stored_status"] == "cooldown"
         assert item["cooldown_reason"] == "risk"
         assert item["risk_count"] == 1
+
+
+def test_explicit_empty_pool_is_configured_without_state_file():
+    previous_explicit = proxy_store.STATE_PATH_EXPLICIT
+    with IsolatedStore():
+        try:
+            proxy_store.STATE_PATH_EXPLICIT = True
+            snapshot = proxy_store.worker_proxy_snapshot()
+            assert snapshot["configured"] is True
+            assert snapshot["item_count"] == 0
+            assert snapshot["urls"] == []
+        finally:
+            proxy_store.STATE_PATH_EXPLICIT = previous_explicit
 
 
 def test_disable_delete_and_legacy_import():
@@ -174,6 +189,7 @@ if __name__ == "__main__":
     test_normalize_proxy_formats_and_rejects_paths()
     test_import_deduplicates_and_public_view_never_leaks_credentials()
     test_probe_result_and_runtime_cooldown_control_worker_selection()
+    test_explicit_empty_pool_is_configured_without_state_file()
     test_disable_delete_and_legacy_import()
     test_async_probe_job_persists_health()
     print("OK proxy store")
