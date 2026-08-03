@@ -19,6 +19,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from secure_files import atomic_write_json, ensure_private_dir
+from runtime_platform import (
+    batch_launch_command,
+    batch_runtime_error,
+    popen_group_kwargs,
+    runtime_python,
+)
 
 try:
     from webui.blacklist_store import read_blacklist as read_blacklist_state
@@ -128,7 +134,7 @@ CONTROL_FILE = LOG_DIR / "monitor_control.json"
 STATS_CACHE = LOG_DIR / "monitor_stats.json"
 BIND_HOST = os.environ.get("MONITOR_HOST", "127.0.0.1")
 BIND_PORT = int(os.environ.get("MONITOR_PORT", "8787"))
-VENV_PY = ROOT / ".venv/bin/python"
+VENV_PY = runtime_python(ROOT)
 ORCH_SCRIPT = ROOT / "run_until_100.py"
 CONTROL_LOCK = threading.RLock()
 START_LOCK = threading.Lock()
@@ -628,6 +634,9 @@ def _runtime_prerequisite_error() -> str | None:
         return f"missing runtime python: {VENV_PY}"
     if not CONFIG_FILE.is_file():
         return f"missing config: {CONFIG_FILE}"
+    launch_error = batch_runtime_error()
+    if launch_error:
+        return launch_error
     return None
 
 
@@ -684,8 +693,8 @@ def _start_orch_unlocked():
             cwd=str(ROOT),
             stdout=stdout,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            **popen_group_kwargs(),
         )
     finally:
         stdout.close()
@@ -738,15 +747,16 @@ def _start_batch_only_unlocked():
     fout = os.fdopen(fd, "w", encoding="utf-8")
     try:
         p = subprocess.Popen(
-            [
-                "xvfb-run", "-a", "-s", "-screen 0 1920x1080x24",
-                str(VENV_PY), "-u", str(ROOT / "run_batch_headless.py"),
-                str(count), str(workers),
-            ],
+            batch_launch_command(
+                ROOT,
+                count,
+                workers,
+                python_path=VENV_PY,
+            ),
             cwd=str(ROOT),
             stdout=fout,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **popen_group_kwargs(),
         )
     finally:
         fout.close()

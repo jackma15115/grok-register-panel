@@ -19,6 +19,7 @@ from webui import account_login_ops
 from webui import account_login_store
 from webui import email_domain_store
 from webui import email_provider_store
+from webui import process_utils
 from webui import proxy_store
 
 
@@ -472,6 +473,43 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
                 os.environ["MONITOR_TOKEN"] = previous_token
 
 
+def test_start_reports_unavailable_process_table():
+    token = "test-runtime-token-123456"
+    previous_token = os.environ.get("MONITOR_TOKEN")
+    previous_find = monitor.find_managed_processes
+
+    def unavailable(*_args, **_kwargs):
+        raise process_utils.ProcessInspectionError(
+            "无法读取系统进程列表；Linux 容器请确认 /proc 已挂载"
+        )
+
+    os.environ["MONITOR_TOKEN"] = token
+    monitor.find_managed_processes = unavailable
+    server = monitor.ThreadingHTTPServer(("127.0.0.1", 0), monitor.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _, body = request(
+            f"http://127.0.0.1:{server.server_port}/api/start",
+            token=token,
+            method="POST",
+            body=b"{}",
+        )
+        payload = json.loads(body)
+        assert status == 500
+        assert "/proc" in payload["error"]
+        assert "已挂载" in payload["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        monitor.find_managed_processes = previous_find
+        if previous_token is None:
+            os.environ.pop("MONITOR_TOKEN", None)
+        else:
+            os.environ["MONITOR_TOKEN"] = previous_token
+
+
 if __name__ == "__main__":
     test_monitor_http_auth_and_headers()
     test_proxy_api_auth_mutations_and_redaction()
@@ -479,4 +517,5 @@ if __name__ == "__main__":
     test_email_provider_api_auth_secret_masking_and_probe()
     test_account_login_api_requires_write_auth_and_hides_secrets()
     test_non_loopback_requires_token()
+    test_start_reports_unavailable_process_table()
     print("OK monitor http")

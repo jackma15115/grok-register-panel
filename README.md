@@ -119,17 +119,26 @@ GROK_REGISTER_IMAGE=ghcr.io/jackma15115/grok-register-panel:latest \
 ### 源码运行环境（可选）
 
 - Python 3.10+
-- Linux 无头建议带 Xvfb；macOS 可本机 GUI/有头
 - 能访问注册页、临时邮箱 API、`auth.x.ai` 的网络
 
 ### 源码安装
+
+| 平台 | 支持状态 | 批处理启动方式 |
+|------|----------|----------------|
+| Linux | 正式支持 | 有显示会话时直启；无显示时面板自动调用 `xvfb-run` |
+| macOS | 正式支持 | 直接使用本机显示会话，不依赖 Xvfb |
+| Windows | 实验性 | 已兼容虚拟环境路径与面板进程启停；浏览器批处理链路仍需自行验证 |
+
+Linux 容器必须保留 procfs（通常为默认的 `/proc` 挂载），面板依赖它读取并安全停止
+当前项目的任务进程。
 
 ```bash
 git clone https://github.com/lij768423-svg/grok-register-panel.git
 cd grok-register-panel
 
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Linux / macOS
+# Windows PowerShell: .venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
 python -m camoufox fetch           # 必须：下载浏览器引擎（约数百 MB）
@@ -183,6 +192,8 @@ sudo apt-get install -y libtk8.6 xvfb xauth
 | `BLACKLIST_STATE_FILE` | `./log/blacklist_state.json` | 运行时 ASN 黑名单状态 |
 | `GROK_BATCH_IDLE_TIMEOUT` | `360` | batch 子进程连续无输出多少秒后自动重建（最小 60 秒） |
 | `GROK_BATCH_MAX_RESTARTS` | `8` | 单批发生驱动崩溃或卡死时最多自动恢复次数 |
+| `GROK_PYTHON_BIN` | 项目 `.venv` 或当前解释器 | 可选：显式指定面板启动任务所用的 Python，支持项目外共享虚拟环境 |
+| `GROK_USE_XVFB` | `auto` | `auto`：仅 Linux 无显示时启用；`1`：Linux 强制启用；`0`：直接启动 |
 | `PROXY_POOL_STATE_FILE` | `./log/proxy_pool.json` | 外部代理池凭据、健康与冷却状态，文件权限 `0600` |
 | `PROXY_NETWORK_COOLDOWN_SECONDS` | `90` | 运行时网络异常的短冷却秒数 |
 | `PROXY_RISK_COOLDOWN_SECONDS` | `1800` | 注册风控后的长冷却秒数 |
@@ -217,6 +228,9 @@ python webui/monitor.py
 # 浏览器打开 http://127.0.0.1:8787/
 ```
 
+从面板或编排器启动批处理时会自动选择运行方式：Linux 无 `DISPLAY` /
+`WAYLAND_DISPLAY` 时使用 Xvfb，Linux 有显示以及 macOS/Windows 均直接启动。
+
 1. 页面顶部 **控制** 区找到 **面板 Token** 输入框  
 2. 填入与 `MONITOR_TOKEN` **相同**的字符串（自动写入 `localStorage`）  
 3. 设模式 / workers / batch 数量 / 再跑 N / 风控满 N → **启动**
@@ -239,11 +253,15 @@ unauthorized: set MONITOR_TOKEN and pass Authorization: Bearer <token>
 
 这是预期行为，不是注册链路崩溃。
 
-**B. 命令行单批（无头 Linux）**
+**B. 命令行单批**
 
 ```bash
+# Linux 无头
 xvfb-run -a python -u run_batch_headless.py 20 3
 #                        数量↑        并发↑
+
+# Linux 有显示 / macOS / Windows
+python -u run_batch_headless.py 20 3
 ```
 
 单批由独立监督进程运行。Playwright/Camoufox 驱动崩溃，或连续超过
@@ -456,8 +474,11 @@ A: 打开“邮箱服务”检查对应 provider 的 Key / JWT / `auth_mode`，�
 **Q: `Address already in use` / 面板打不开？**  
 A: 8787 被其它进程占用（例如同机其它服务）。换 `MONITOR_PORT`，或先释放端口。绑定失败**不会**自动改绑 `0.0.0.0`。
 
+**Q: 启动任务报 `[Errno 2] No such file or directory: '/proc'`？**
+A: 旧版面板直接读取 Linux `/proc`，macOS 上必然失败；更新后面板改用 `psutil`。若新版仍在 Linux 容器中提示无法读取进程列表，说明容器没有挂载 procfs，请恢复默认 `/proc` 挂载后重启面板。不要用“忽略进程检测”绕过，否则可能重复启动任务。
+
 **Q: Windows？**  
-A: 主要在 macOS 与无界面 Linux 验证；Windows 需自备显示/依赖，欢迎 PR。
+A: 面板已适配 `.venv\\Scripts\\python.exe`、进程发现和停止；Camoufox 浏览器批处理链路仍标为实验性。生产使用优先 Linux 或 macOS。
 
 **Q: 面板和真实进程不一致？**  
 A: 看 `log/orch100-stdout.log` 与最新 `log/batch-*.log`；欢迎提 issue / PR。
@@ -486,6 +507,21 @@ A: 在控制台使用“账号补录”。待处理模式成功后自动出队�
 | 路径 | `run_batch_headless` / blacklist 使用包相对 ROOT，无硬编码机器路径 |
 | 稳定性 | `from __future__` 置顶；`Path` 先于 `chdir`；workers DOM id 拆分 |
 | 结果流 | `register_results.jsonl` 仅 JSON 行 |
+
+## Star History
+
+<a href="https://github.com/lij768423-svg/grok-register-panel/stargazers">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/star-history-dark.svg">
+    <img alt="Grok Register Panel GitHub Star 增长趋势" src="docs/star-history-light.svg">
+  </picture>
+</a>
+
+图表根据 GitHub Stargazer 时间戳生成，由 GitHub Actions 每日更新，不依赖第三方绘图接口。
+
+## 相关项目
+
+- [grok2api-egress-enhancements](https://github.com/lij768423-svg/grok2api-egress-enhancements) — grok2api 出口增强补丁：固定代理快速恢复 + 出口质量守护（被动 Token/s 熔断、硬阈值隔离、最低健康节点、管理面板）
 
 ## 友情链接
 

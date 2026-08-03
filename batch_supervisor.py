@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from runtime_platform import popen_group_kwargs
 from secure_files import atomic_write_json, exclusive_file_lock
 
 
@@ -172,8 +173,8 @@ def run_supervisor(
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                start_new_session=True,
                 env=env,
+                **popen_group_kwargs(),
             )
             assert active_process.stdout is not None
             selector = selectors.DefaultSelector()

@@ -69,6 +69,61 @@ def test_process_discovery_is_root_scoped():
                 process.wait(timeout=3)
 
 
+def test_process_discovery_works_without_direct_proc_access():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+
+        class FakeProcess:
+            def __init__(self, pid, cwd, command):
+                self.info = {
+                    "pid": pid,
+                    "cwd": str(cwd),
+                    "cmdline": command,
+                    "create_time": time.time() - 65,
+                }
+
+        processes = [
+            FakeProcess(123456, root, [sys.executable, str(root / "managed.py")]),
+            FakeProcess(123457, ROOT, [sys.executable, str(ROOT / "managed.py")]),
+        ]
+        original_process_iter = process_utils.psutil.process_iter
+        try:
+            process_utils.psutil.process_iter = lambda **_kwargs: iter(processes)
+            found = process_utils.find_managed_processes(root, ("managed.py",))
+        finally:
+            process_utils.psutil.process_iter = original_process_iter
+
+        assert [item["pid"] for item in found] == [123456]
+        assert found[0]["etime"] == "01:05"
+
+
+def test_process_discovery_reports_missing_process_table():
+    original_process_iter = process_utils.psutil.process_iter
+
+    def unavailable(**_kwargs):
+        raise FileNotFoundError("process table unavailable")
+
+    try:
+        process_utils.psutil.process_iter = unavailable
+        try:
+            process_utils.find_managed_processes(ROOT, ("run_until_100.py",))
+        except process_utils.ProcessInspectionError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("missing process table must fail closed")
+    finally:
+        process_utils.psutil.process_iter = original_process_iter
+
+    assert "/proc" in message
+    assert "psutil" in message
+
+
+def test_process_discovery_source_has_no_direct_proc_reads():
+    source = (ROOT / "webui" / "process_utils.py").read_text(encoding="utf-8")
+    assert 'Path("/proc")' not in source
+    assert "os.readlink" not in source
+
+
 def test_no_network_metadata_is_written_to_source():
     orchestrator = (ROOT / "run_until_100.py").read_text(encoding="utf-8")
     browser = (ROOT / "browser_session.py").read_text(encoding="utf-8")
@@ -117,6 +172,9 @@ if __name__ == "__main__":
     test_private_file_helpers()
     test_blacklist_state_is_data_and_sanitized()
     test_process_discovery_is_root_scoped()
+    test_process_discovery_works_without_direct_proc_access()
+    test_process_discovery_reports_missing_process_table()
+    test_process_discovery_source_has_no_direct_proc_reads()
     test_no_network_metadata_is_written_to_source()
     test_permission_hardener_covers_runtime_pools_without_following_symlinks()
     print("OK runtime security")

@@ -5,8 +5,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from runtime_platform import popen_group_kwargs, runtime_python
 
 try:
     from secure_files import ensure_private_dir, exclusive_file_lock
@@ -16,11 +23,6 @@ try:
         write_pid_file,
     )
 except ImportError:  # running from webui/
-    import sys
-
-    ROOT = Path(__file__).resolve().parent.parent
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
     from secure_files import ensure_private_dir, exclusive_file_lock
     from process_utils import (  # type: ignore
         find_managed_processes,
@@ -28,8 +30,6 @@ except ImportError:  # running from webui/
         write_pid_file,
     )
 
-
-ROOT = Path(__file__).resolve().parent.parent
 ACCOUNTS_DIR = ROOT / "accounts"
 PENDING_FILE = ACCOUNTS_DIR / "sso_pending.txt"
 RISK_FILE = ACCOUNTS_DIR / "sso_risk_rejected.txt"
@@ -38,7 +38,7 @@ LOG_DIR = ROOT / "log"
 REPORT_FILE = LOG_DIR / "recovery_report.json"
 PID_FILE = LOG_DIR / "recovery.pid"
 RECOVERY_SCRIPT = ROOT / "sso_to_auth_json.py"
-VENV_PY = ROOT / ".venv" / "bin" / "python"
+VENV_PY = runtime_python(ROOT)
 CONFIG_FILE = Path(
     os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
 )
@@ -220,8 +220,8 @@ def start_recovery(scope: str = "pending") -> dict:
             cwd=str(ROOT),
             stdout=output,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            **popen_group_kwargs(),
         )
     finally:
         output.close()

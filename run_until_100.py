@@ -11,6 +11,7 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 
+from runtime_platform import batch_launch_command, popen_group_kwargs, runtime_python
 from secure_files import append_private_text, ensure_private_dir
 from webui.blacklist_store import add_asn as add_blacklist_asn
 from webui.blacklist_store import read_blacklist
@@ -106,21 +107,16 @@ def start_batch(count: int):
     fout = os.fdopen(fd, "w", encoding="utf-8")
     try:
         proc = subprocess.Popen(
-            [
-                "xvfb-run",
-                "-a",
-                "-s",
-                "-screen 0 1920x1080x24",
-                str(ROOT / ".venv/bin/python"),
-                "-u",
-                str(ROOT / "run_batch_headless.py"),
-                str(count),
-                str(WORKERS),
-            ],
+            batch_launch_command(
+                ROOT,
+                count,
+                WORKERS,
+                python_path=runtime_python(ROOT),
+            ),
             cwd=str(ROOT),
             stdout=fout,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **popen_group_kwargs(),
         )
     finally:
         fout.close()
