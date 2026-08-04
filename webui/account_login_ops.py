@@ -277,6 +277,7 @@ def start_account_login(
     concurrency: object = 1,
     extract_cpa: object = False,
     pending_only: bool = False,
+    pending_scope: str | None = None,
 ) -> dict:
     if find_managed_processes(ROOT, ("run_until_100.py", "run_batch_headless.py")):
         return {"ok": False, "error": "registration task is running"}
@@ -285,6 +286,8 @@ def start_account_login(
     existing = _workers()
     if existing:
         return {"ok": False, "error": "account login task already running", "pid": existing[0]["pid"]}
+    if pending_scope not in {None, "sso_missing", "cpa_missing"}:
+        return {"ok": False, "error": f"unknown account login scope: {pending_scope}"}
     reset_incomplete_accounts()
     if not WORKER_SCRIPT.is_file():
         return {"ok": False, "error": f"missing worker script: {WORKER_SCRIPT}"}
@@ -293,12 +296,13 @@ def start_account_login(
         workers = max(1, min(5, int(concurrency or 1)))
     except (TypeError, ValueError):
         return {"ok": False, "error": "concurrency must be an integer from 1 to 5"}
-    want_cpa = bool(extract_cpa)
+    want_cpa = bool(extract_cpa) or pending_scope == "cpa_missing"
     requested = [str(value or "").strip() for value in (ids or []) if str(value or "").strip()]
     records = private_accounts(
         requested,
-        pending_only=bool(pending_only or not requested),
+        pending_only=bool(pending_only or (not requested and pending_scope is None)),
         include_sso_only=want_cpa,
+        pending_scope=pending_scope,
     )
     if requested:
         found_ids = {item["id"] for item in records}

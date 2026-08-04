@@ -114,6 +114,44 @@ def test_reset_incomplete_accounts_is_scoped_to_job_ids():
             store.STATE_PATH, store.LOCK_PATH = previous
 
 
+def test_pending_scopes_split_sso_and_cpa_gaps():
+    with tempfile.TemporaryDirectory() as temp:
+        previous = _with_temp_store(temp)
+        try:
+            store.import_account_credentials(
+                "missing-sso@example.test----password-one\n"
+                "missing-cpa@example.test----password-two\n"
+                "complete@example.test----password-three\n"
+                "failed-cpa@example.test----password-four"
+            )
+            items = {item["email"]: item for item in store.private_accounts()}
+            store.update_account(items["missing-cpa@example.test"]["id"], sso="sso-two", status="sso_only")
+            store.update_account(
+                items["complete@example.test"]["id"],
+                sso="sso-three",
+                status="success",
+                cpa_ok=True,
+            )
+            store.update_account(
+                items["failed-cpa@example.test"]["id"],
+                sso="sso-four",
+                status="failed",
+            )
+
+            inventory = store.read_account_inventory()
+            assert inventory["summary"]["sso_missing"] == 1
+            assert inventory["summary"]["cpa_missing"] == 2
+            assert [item["email"] for item in store.private_accounts(pending_scope="sso_missing")] == [
+                "missing-sso@example.test"
+            ]
+            assert {
+                item["email"]
+                for item in store.private_accounts(pending_scope="cpa_missing")
+            } == {"missing-cpa@example.test", "failed-cpa@example.test"}
+        finally:
+            store.STATE_PATH, store.LOCK_PATH = previous
+
+
 if __name__ == "__main__":
     test_import_formats_and_public_secret_redaction()
     test_deduplicate_update_and_status_changes()

@@ -224,6 +224,9 @@ def test_imported_account_login_panel_structure():
     assert 'id="account-login-select-all"' in html
     assert 'id="account-login-start-selected"' in html
     assert 'id="account-login-start-pending"' in html
+    assert 'id="account-login-start-cpa-missing"' in html
+    assert "startAccountLogin('sso_missing')" in html
+    assert "startAccountLogin('cpa_missing')" in html
     assert 'id="account-login-stop"' in html
     assert 'id="account-login-body"' in html
     assert 'id="account-login-tail"' in html

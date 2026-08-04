@@ -231,6 +231,16 @@ def read_account_inventory() -> dict:
     summary = {
         "total": len(items),
         "pending": sum(1 for item in items if item["status"] in {"pending", "cancelled"}),
+        "sso_missing": sum(
+            1
+            for item in items
+            if not item["has_sso"] and item["status"] not in {"queued", "running"}
+        ),
+        "cpa_missing": sum(
+            1
+            for item in items
+            if item["has_sso"] and not item["cpa_ok"] and item["status"] not in {"queued", "running"}
+        ),
         "queued": sum(1 for item in items if item["status"] == "queued"),
         "running": sum(1 for item in items if item["status"] == "running"),
         "sso_success": sum(1 for item in items if item["has_sso"]),
@@ -291,7 +301,13 @@ def import_account_credentials(text: object) -> dict:
     }
 
 
-def private_accounts(ids: object = None, *, pending_only: bool = False, include_sso_only: bool = False) -> list[dict]:
+def private_accounts(
+    ids: object = None,
+    *,
+    pending_only: bool = False,
+    include_sso_only: bool = False,
+    pending_scope: str | None = None,
+) -> list[dict]:
     requested = {str(value or "").strip() for value in (ids or []) if str(value or "").strip()}
     with exclusive_file_lock(LOCK_PATH):
         state = _read_unlocked()
@@ -299,7 +315,17 @@ def private_accounts(ids: object = None, *, pending_only: bool = False, include_
     for item in state["items"]:
         if requested and item["id"] not in requested:
             continue
-        if pending_only:
+        if pending_scope == "sso_missing":
+            if item["sso"] or item["status"] in {"queued", "running"}:
+                continue
+        elif pending_scope == "cpa_missing":
+            if (
+                not item["sso"]
+                or item["cpa_ok"]
+                or item["status"] in {"queued", "running"}
+            ):
+                continue
+        elif pending_only:
             allowed = {"pending", "failed", "cancelled"}
             if include_sso_only:
                 allowed.add("sso_only")

@@ -2213,7 +2213,8 @@ HTML = r"""<!DOCTYPE html>
           <button class="primary" id="account-login-import" onclick="importAccountLoginInput()">导入账号</button>
           <button id="account-login-select-all" onclick="toggleAccountLoginSelectAll()">全选</button>
           <button id="account-login-start-selected" onclick="startAccountLogin('selected')">登录选中</button>
-          <button id="account-login-start-pending" onclick="startAccountLogin('pending')">登录待处理</button>
+          <button id="account-login-start-pending" onclick="startAccountLogin('sso_missing')">登录 SSO 缺失</button>
+          <button id="account-login-start-cpa-missing" onclick="startAccountLogin('cpa_missing')">补录 CPA 缺失</button>
           <button class="danger" id="account-login-stop" onclick="stopAccountLogin()">停止</button>
           <button class="danger" id="account-login-delete" onclick="deleteAccountLoginSelected()">删除选中</button>
           <button id="account-login-refresh" onclick="refreshAccountLogin(true)">刷新</button>
@@ -3064,7 +3065,8 @@ function renderAccountLogin(data) {
   const summary = accountLoginData.summary || {};
   document.getElementById("account-login-kpis").innerHTML = [
     ["总数", summary.total ?? 0, ""],
-    ["待处理", summary.pending ?? 0, (summary.pending || 0) > 0 ? "warn" : ""],
+    ["SSO 缺失", summary.sso_missing ?? summary.pending ?? 0, (summary.sso_missing || summary.pending || 0) > 0 ? "warn" : ""],
+    ["CPA 缺失", summary.cpa_missing ?? 0, (summary.cpa_missing || 0) > 0 ? "accent" : "ok"],
     ["运行中", (summary.queued || 0) + (summary.running || 0), accountLoginData.running ? "accent" : ""],
     ["SSO 成功", summary.sso_success ?? 0, "ok"],
     ["CPA 成功", summary.cpa_success ?? 0, "ok"],
@@ -3106,7 +3108,8 @@ function renderAccountLogin(data) {
   document.getElementById("account-login-select-all").disabled = items.length === 0;
   document.getElementById("account-login-select-all").textContent = allSelected ? "取消全选" : "全选";
   document.getElementById("account-login-start-selected").disabled = running || selected === 0;
-  document.getElementById("account-login-start-pending").disabled = running || items.length === 0;
+  document.getElementById("account-login-start-pending").disabled = running || !(summary.sso_missing > 0);
+  document.getElementById("account-login-start-cpa-missing").disabled = running || !(summary.cpa_missing > 0);
   document.getElementById("account-login-stop").disabled = !running;
   document.getElementById("account-login-delete").disabled = running || selected === 0;
 }
@@ -3136,10 +3139,11 @@ async function startAccountLogin(scope) {
   if (scope === "selected" && !ids.length) { setMsg("account-login-msg", "请先选择账号", "err"); return; }
   const concurrency = Number(document.getElementById("account-login-concurrency").value || 1);
   const extractCpa = document.getElementById("account-login-cpa").checked;
-  setMsg("account-login-msg", "正在启动登录任务…", "");
+  setMsg("account-login-msg", scope === "cpa_missing" ? "正在启动 CPA 补录任务…" : "正在启动登录任务…", "");
   try {
     const data = await api("/api/account-login/start", { method: "POST", body: JSON.stringify({ ids, scope, concurrency, extract_cpa: extractCpa }) });
-    setMsg("account-login-msg", "登录任务已启动，共 " + (data.input_count || 0) + " 个账号", "ok");
+    const taskLabel = scope === "cpa_missing" ? "CPA 补录任务" : "登录任务";
+    setMsg("account-login-msg", taskLabel + "已启动，共 " + (data.input_count || 0) + " 个账号", "ok");
     await refreshAccountLogin(false);
   } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
 }
@@ -3608,12 +3612,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if u.path == "/api/account-login/start":
             try:
+                scope = str((body or {}).get("scope") or "pending").strip().lower()
                 with START_LOCK:
                     result = start_account_login(
                         body.get("ids"),
                         concurrency=body.get("concurrency") or 1,
                         extract_cpa=body.get("extract_cpa") is True,
-                        pending_only=(body.get("scope") == "pending"),
+                        pending_only=(scope == "pending"),
+                        pending_scope=None if scope in {"selected", "pending"} else scope,
                     )
                 self._json(202 if result.get("ok") else 409, result)
             except Exception as exc:

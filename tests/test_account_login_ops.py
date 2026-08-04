@@ -92,6 +92,54 @@ def test_start_writes_id_only_job_and_launches_worker():
             ) = previous
 
 
+def test_cpa_missing_scope_filters_and_forces_cpa_extraction():
+    with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp)
+        worker_script = base / "account_login_worker.py"
+        worker_script.write_text("# test worker\n", encoding="utf-8")
+        previous = (
+            ops.LOG_DIR,
+            ops.WORKER_SCRIPT,
+            ops.JOB_FILE,
+            ops.REPORT_FILE,
+            ops.PID_FILE,
+            ops.VENV_PY,
+        )
+        ops.LOG_DIR = base / "log"
+        ops.WORKER_SCRIPT = worker_script
+        ops.JOB_FILE = ops.LOG_DIR / "account_login_job.json"
+        ops.REPORT_FILE = ops.LOG_DIR / "account_login_report.json"
+        ops.PID_FILE = ops.LOG_DIR / "account_login.pid"
+        ops.VENV_PY = base / ".venv" / "bin" / "python"
+        record = {"id": "c" * 20, "email": "cpa@example.test", "password": "secret", "sso": "sso"}
+        try:
+            with patch.object(ops, "find_managed_processes", return_value=[]), patch.object(
+                ops, "reset_incomplete_accounts", return_value=0
+            ), patch.object(ops, "private_accounts", return_value=[record]) as private, patch.object(
+                ops, "mark_accounts_queued", return_value=1
+            ), patch.object(ops.shutil, "which", return_value=None), patch.object(
+                ops.subprocess,
+                "Popen",
+                side_effect=lambda command, **kwargs: SimpleNamespace(pid=5432, wait=lambda: 0),
+            ):
+                result = ops.start_account_login([], pending_scope="cpa_missing", extract_cpa=False)
+
+            assert result["ok"] is True
+            assert result["extract_cpa"] is True
+            assert private.call_args.kwargs["pending_scope"] == "cpa_missing"
+            job = json.loads(ops.JOB_FILE.read_text(encoding="utf-8"))
+            assert job["extract_cpa"] is True
+        finally:
+            (
+                ops.LOG_DIR,
+                ops.WORKER_SCRIPT,
+                ops.JOB_FILE,
+                ops.REPORT_FILE,
+                ops.PID_FILE,
+                ops.VENV_PY,
+            ) = previous
+
+
 def test_worker_watcher_persists_linux_launcher_failure():
     with tempfile.TemporaryDirectory() as temp:
         base = Path(temp)

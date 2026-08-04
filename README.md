@@ -382,7 +382,7 @@ python sso_to_auth_json.py \
 
 - 支持 `email----password`、`email,password`、`email:password` 和 Tab 分隔；CSV 可使用 `email,password` 或 `email,passwd` 表头。单次导入不设账号条数上限，仅受 `MONITOR_MAX_REQUEST_BODY` 请求体大小控制
 - 导入时按邮箱去重；同邮箱密码变化会清除旧 SSO / CPA 状态并重新进入待处理
-- “登录选中”只处理勾选账号；“登录待处理”会处理待处理、失败和已停止账号，开启 CPA 时也会重转已有 SSO
+- “登录选中”只处理勾选账号；“登录 SSO 缺失”只处理未提取 SSO 的账号；“补录 CPA 缺失”只处理已有 SSO 但尚未写入 CPA 的账号
 - 每个账号启动独立 Camoufox 会话，沿用面板健康代理池；登录成功写入 `accounts/{email}.txt` 的 `email----password----sso` 标准格式
 - 开启“提取 CPA / Grok2API”后调用现有 SSO 转换配置；转换失败时保留 SSO，并显示为“SSO 已提取”供后续重试
 - 账号登录、批量注册和账号补录互斥，避免并发争用浏览器与 auth 输出
