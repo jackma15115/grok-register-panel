@@ -20,6 +20,7 @@ from webui import account_exports, monitor
 
 TOKEN_A = "a" * 80
 TOKEN_B = "b" * 80
+TOKEN_C = "c" * 80
 
 
 def _request(url: str, token: str = ""):
@@ -40,7 +41,8 @@ def test_local_exports_include_pending_sso_and_escape_csv():
             encoding="utf-8",
         )
         (accounts / "accounts_batch.txt").write_text(
-            f"person@example.test----comma,quote\"----{TOKEN_A}\n",
+            f"person@example.test----comma,quote\"----{TOKEN_A}\n"
+            f"PERSON@example.test----new-snapshot----{TOKEN_C}\n",
             encoding="utf-8",
         )
         (accounts / "sso_pending.txt").write_text(
@@ -56,7 +58,7 @@ def test_local_exports_include_pending_sso_and_escape_csv():
             csv_name, csv_body = account_exports.credentials_csv_export()
 
     assert sso_name.startswith("grok-register-sso-")
-    assert sso_body.decode("utf-8").splitlines() == [TOKEN_A, TOKEN_B]
+    assert sso_body.decode("utf-8").splitlines() == [TOKEN_A, TOKEN_C, TOKEN_B]
     assert csv_name.startswith("grok-register-accounts-")
     assert csv_body.startswith(b"\xef\xbb\xbf")
     parsed = list(csv.reader(io.StringIO(csv_body.decode("utf-8-sig"), newline="")))

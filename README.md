@@ -363,6 +363,7 @@ python grok_register_ttk.py
 
 - **补录待处理**：读取 `accounts/sso_pending.txt`，跳过 CPA 已存在邮箱，成功一条立即原子出队
 - **扫描全部账号**：扫描 `accounts/*.txt` 并对缺失 CPA 的记录执行转换，不删除原账号文件
+- 补录记录有邮箱时按邮箱（忽略大小写）去重，无邮箱时按 SSO 去重；同邮箱补录成功后会清理队列中的全部重复快照
 - **导出 SSO**：汇总账号文件与 `sso_pending.txt`，去重后每行导出一个 SSO；明确排除 `sso_risk_rejected.txt`
 - **导出账号 CSV**：导出 `email,passwd` 两列，使用 UTF-8 BOM 和标准 CSV 转义，便于表格软件直接打开
 - 两个导出接口始终要求匹配 `MONITOR_TOKEN`，即使普通读取接口允许匿名也不会放宽

@@ -16,7 +16,10 @@ ACCOUNTS_DIR = ROOT / "accounts"
 
 def account_records() -> list:
     """Load account and pending-SSO files using the recovery parser."""
-    return load_sso_records(accounts_dir=str(ACCOUNTS_DIR))
+    return load_sso_records(
+        accounts_dir=str(ACCOUNTS_DIR),
+        dedupe_by_email=False,
+    )
 
 
 def sso_values() -> list[str]:

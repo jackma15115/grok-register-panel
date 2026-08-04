@@ -8,11 +8,13 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from sso_to_auth_json import (
+    _dedupe_sso_inputs,
     _principal_id_from_response,
     consume_successful_records,
     existing_cpa_emails,
@@ -20,10 +22,12 @@ from sso_to_auth_json import (
     parse_sso_line,
     should_create_default_out_dir,
 )
+from webui import recovery_ops
 
 
 TOKEN_A = "a" * 80
 TOKEN_B = "b" * 80
+TOKEN_C = "c" * 80
 
 
 def test_principal_id_is_extracted_from_authenticated_account_page():
@@ -60,6 +64,74 @@ def test_queue_dedup_and_consume():
         assert TOKEN_B in queue.read_text(encoding="utf-8")
         if os.name == "posix":
             assert stat.S_IMODE(queue.stat().st_mode) == 0o600
+
+
+def test_dedupe_prefers_email_identity_and_keeps_conflicting_emails_separate():
+    first = parse_sso_line(f"Person@Example.com----{TOKEN_A}")
+    second = parse_sso_line(f"person@example.com----password----{TOKEN_B}")
+    conflicting = parse_sso_line(f"other@example.com----{TOKEN_A}")
+    assert first and second and conflicting
+
+    records = _dedupe_sso_inputs([first, second, conflicting])
+
+    assert [(record.email, record.sso) for record in records] == [
+        ("Person@Example.com", TOKEN_A),
+        ("other@example.com", TOKEN_A),
+    ]
+    assert records[0].password == "password"
+
+
+def test_dedupe_sso_only_and_email_snapshot():
+    anonymous = parse_sso_line(TOKEN_A)
+    named = parse_sso_line(f"person@example.com----{TOKEN_A}")
+    duplicate_anonymous = parse_sso_line(TOKEN_A)
+    assert anonymous and named and duplicate_anonymous
+
+    records = _dedupe_sso_inputs([anonymous, named, duplicate_anonymous])
+
+    assert len(records) == 1
+    assert records[0].email == "person@example.com"
+
+
+def test_consume_successful_records_removes_all_entries_for_email():
+    with tempfile.TemporaryDirectory() as temp:
+        queue = Path(temp) / "sso_pending.txt"
+        queue.write_text(
+            f"Person@Example.com----{TOKEN_A}\n"
+            f"person@example.com----password----{TOKEN_B}\n"
+            f"other@example.com----{TOKEN_A}\n"
+            f"{TOKEN_B}\n",
+            encoding="utf-8",
+        )
+
+        remaining = consume_successful_records(queue, {TOKEN_A}, {"person@example.com"})
+
+        assert remaining == 2
+        body = queue.read_text(encoding="utf-8")
+        assert "Person@Example.com" not in body
+        assert "person@example.com" not in body
+        assert "other@example.com" in body
+        assert TOKEN_B in body
+
+
+def test_panel_account_count_dedupes_email_across_files():
+    with tempfile.TemporaryDirectory() as temp:
+        accounts = Path(temp)
+        (accounts / "first.txt").write_text(
+            f"Person@Example.com----first-password----{TOKEN_A}\n",
+            encoding="utf-8",
+        )
+        (accounts / "second.txt").write_text(
+            f"person@example.com----second-password----{TOKEN_B}\n"
+            f"{TOKEN_C}\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(recovery_ops, "ACCOUNTS_DIR", accounts):
+            records = recovery_ops._account_records()
+
+        assert len(records) == 2
+        assert sorted(records.values()) == ["", "person@example.com"]
 
 
 def test_cpa_only_batch_does_not_create_auth_out():

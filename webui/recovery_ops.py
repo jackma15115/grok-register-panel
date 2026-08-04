@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from runtime_platform import popen_group_kwargs, runtime_python
+from sso_to_auth_json import load_sso_records
 
 try:
     from secure_files import ensure_private_dir, exclusive_file_lock
@@ -63,22 +64,18 @@ def _parse_line(line: str) -> tuple[str, str] | None:
 
 def _records_from_file(path: Path) -> dict[str, str]:
     try:
-        if path == PENDING_FILE:
-            with exclusive_file_lock(path.with_suffix(path.suffix + ".lock")):
-                lines = path.read_text(encoding="utf-8").splitlines()
-        else:
-            lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+        records = load_sso_records(path=str(path))
+    except (OSError, ValueError):
         return {}
-    records: dict[str, str] = {}
-    for line in lines:
-        parsed = _parse_line(line)
-        if not parsed:
-            continue
-        email, sso = parsed
-        if sso not in records or email:
-            records[sso] = email
-    return records
+    # Keep a stable key for the account identity.  Email is preferred because
+    # repeated logins can produce different SSO snapshots for one account.
+    # SSO-only records retain token identity and do not merge into named users.
+    result: dict[str, str] = {}
+    for record in records:
+        email = str(record.email or "").strip().lower()
+        identity = f"email:{email}" if email else f"sso:{record.sso}"
+        result.setdefault(identity, email)
+    return result
 
 
 def _nonempty_line_count(path: Path) -> int:
@@ -99,9 +96,9 @@ def _account_records() -> dict[str, str]:
     for path in sorted(ACCOUNTS_DIR.glob("*.txt")):
         if path.name in {"mail_credentials.txt", "sso_risk_rejected.txt"}:
             continue
-        for sso, email in _records_from_file(path).items():
-            if sso not in records or email:
-                records[sso] = email
+        for identity, email in _records_from_file(path).items():
+            if identity not in records or email:
+                records[identity] = email
     return records
 
 

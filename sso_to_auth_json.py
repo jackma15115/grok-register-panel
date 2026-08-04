@@ -1491,29 +1491,59 @@ def parse_sso_line(line: str, source: str = "") -> SsoInput | None:
     )
 
 
-def _dedupe_sso_inputs(records: list[SsoInput]) -> list[SsoInput]:
-    by_sso: dict[str, SsoInput] = {}
-    order: list[str] = []
-    for record in records:
-        previous = by_sso.get(record.sso)
-        if previous is None:
-            order.append(record.sso)
-            by_sso[record.sso] = record
-            continue
-        by_sso[record.sso] = SsoInput(
-            sso=record.sso,
+def _dedupe_sso_inputs(
+    records: list[SsoInput],
+    *,
+    prefer_email_identity: bool = True,
+) -> list[SsoInput]:
+    """Deduplicate account inputs by email when available, otherwise by SSO.
+
+    A single account can have multiple SSO snapshots after repeated logins.  The
+    email is the stable account identity in those records, while SSO-only lines
+    have no stronger identity than the token itself.  Keep the first record's
+    SSO/order stable and only merge missing metadata from later duplicates.
+    """
+    def merge(previous: SsoInput, record: SsoInput) -> SsoInput:
+        return SsoInput(
+            sso=previous.sso,
             email=previous.email or record.email,
             password=previous.password or record.password,
             source=previous.source or record.source,
             raw_line=previous.raw_line or record.raw_line,
         )
-    return [by_sso[sso] for sso in order]
+
+    email_by_sso: dict[str, str] = {}
+    if prefer_email_identity:
+        for record in records:
+            normalized_email = str(record.email or "").strip().lower()
+            if normalized_email:
+                email_by_sso.setdefault(record.sso, normalized_email)
+
+    by_identity: dict[str, SsoInput] = {}
+    order: list[str] = []
+    for record in records:
+        normalized_email = (
+            str(record.email or "").strip().lower()
+            if prefer_email_identity
+            else ""
+        )
+        normalized_email = normalized_email or email_by_sso.get(record.sso, "")
+        identity = f"email:{normalized_email}" if normalized_email else f"sso:{record.sso}"
+        previous = by_identity.get(identity)
+        if previous is None:
+            order.append(identity)
+            by_identity[identity] = record
+        else:
+            by_identity[identity] = merge(previous, record)
+    return [by_identity[identity] for identity in order]
 
 
 def load_sso_records(
     path: str | None = None,
     single: str | None = None,
     accounts_dir: str | None = None,
+    *,
+    dedupe_by_email: bool = True,
 ) -> list[SsoInput]:
     records: list[SsoInput] = []
     if single:
@@ -1545,27 +1575,59 @@ def load_sso_records(
             parsed = parse_sso_line(line, source=str(input_path))
             if parsed:
                 records.append(parsed)
-    return _dedupe_sso_inputs(records)
+    return _dedupe_sso_inputs(records, prefer_email_identity=dedupe_by_email)
 
 
 def load_sso_list(path: str | None, single: str | None) -> list[str]:
     """Backward-compatible SSO-only loader."""
-    return [record.sso for record in load_sso_records(path=path, single=single)]
+    return [
+        record.sso
+        for record in load_sso_records(
+            path=path,
+            single=single,
+            dedupe_by_email=False,
+        )
+    ]
 
 
-def consume_successful_records(path: str | Path, succeeded_ssos: set[str]) -> int:
+def consume_successful_records(
+    path: str | Path,
+    succeeded_ssos: set[str],
+    succeeded_emails: set[str] | None = None,
+) -> int:
+    """Remove successful queue entries by SSO and, when known, by email.
+
+    Removing by email matters when repeated login attempts left multiple SSO
+    snapshots for one account.  SSO-only records continue to be removed only by
+    their exact SSO value.
+    """
     queue_path = Path(path)
     if not queue_path.exists():
         return 0
+    email_aware = succeeded_emails is not None
+    normalized_ssos = {str(value or "").strip() for value in (succeeded_ssos or set())}
+    normalized_emails = {
+        str(value or "").strip().lower()
+        for value in (succeeded_emails or set())
+        if str(value or "").strip()
+    }
     with exclusive_file_lock(queue_path.with_suffix(queue_path.suffix + ".lock")):
-        if not succeeded_ssos:
+        if not normalized_ssos and not normalized_emails:
             lines = queue_path.read_text(encoding="utf-8").splitlines()
             return sum(1 for line in lines if parse_sso_line(line, source=str(queue_path)))
         kept: list[str] = []
         for line in queue_path.read_text(encoding="utf-8").splitlines():
             parsed = parse_sso_line(line, source=str(queue_path))
-            if parsed and parsed.sso in succeeded_ssos:
-                continue
+            if parsed:
+                parsed_email = str(parsed.email or "").strip().lower()
+                if parsed_email:
+                    should_remove = parsed_email in normalized_emails or (
+                        not email_aware and parsed.sso in normalized_ssos
+                    )
+                else:
+                    should_remove = parsed.sso in normalized_ssos
+                if should_remove:
+                    continue
             kept.append(line)
         body = "\n".join(kept)
         if body:
@@ -1723,10 +1785,18 @@ def main() -> int:
         if record.email and record.email.strip().lower() in existing_emails
     ]
     if already_present:
-        existing_ssos = {record.sso for record in already_present}
-        records = [record for record in records if record.sso not in existing_ssos]
+        existing_emails_for_queue = {
+            str(record.email or "").strip().lower()
+            for record in already_present
+            if str(record.email or "").strip()
+        }
+        records = [
+            record
+            for record in records
+            if str(record.email or "").strip().lower() not in existing_emails_for_queue
+        ]
         if args.consume_success and args.sso:
-            consume_successful_records(args.sso, existing_ssos)
+            consume_successful_records(args.sso, set(), existing_emails_for_queue)
         print(f"跳过已存在 CPA 的记录: {len(already_present)}")
 
     if should_create_default_out_dir(args, len(records)):
@@ -1752,6 +1822,7 @@ def main() -> int:
     ok = 0
     fail = 0
     succeeded_ssos: set[str] = set()
+    succeeded_emails: set[str] = set()
     failures: list[dict] = []
 
     for i, record in enumerate(records, 1):
@@ -1818,8 +1889,10 @@ def main() -> int:
 
             ok += 1
             succeeded_ssos.add(sso)
+            if email:
+                succeeded_emails.add(email.lower())
             if args.consume_success and args.sso:
-                consume_successful_records(args.sso, {sso})
+                consume_successful_records(args.sso, {sso}, {email.lower()} if email else set())
             print(f"  ✅ [{i}] 完成 user_id={uid[:12]}...")
         except Exception as e:
             fail += 1
@@ -1837,7 +1910,7 @@ def main() -> int:
 
     remaining = None
     if args.consume_success and args.sso:
-        remaining = consume_successful_records(args.sso, succeeded_ssos)
+        remaining = consume_successful_records(args.sso, succeeded_ssos, succeeded_emails)
         print(f"  队列剩余 {remaining} 条")
     report = {
         "version": 1,
