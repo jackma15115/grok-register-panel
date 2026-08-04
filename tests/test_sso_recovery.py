@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from sso_to_auth_json import (
+    _principal_id_from_response,
     consume_successful_records,
     existing_cpa_emails,
     load_sso_records,
@@ -23,6 +24,13 @@ from sso_to_auth_json import (
 
 TOKEN_A = "a" * 80
 TOKEN_B = "b" * 80
+
+
+def test_principal_id_is_extracted_from_authenticated_account_page():
+    user_id = "12345678-abcd-4def-8123-1234567890ab"
+    assert _principal_id_from_response(f'{{"userId":"{user_id}"}}') == user_id
+    assert _principal_id_from_response(f'{{\\"userId\\":\\"{user_id}\\"}}') == user_id
+    assert _principal_id_from_response('{"sessionId":"not-a-principal"}') == ""
 
 
 def test_parser_preserves_email_and_password():
@@ -77,6 +85,7 @@ def test_existing_cpa_email_detection():
 
 
 if __name__ == "__main__":
+    test_principal_id_is_extracted_from_authenticated_account_page()
     test_parser_preserves_email_and_password()
     test_queue_dedup_and_consume()
     test_cpa_only_batch_does_not_create_auth_out()

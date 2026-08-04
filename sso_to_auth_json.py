@@ -76,6 +76,7 @@ DEVICE_GRACE_PROTOCOL = 6
 # plan=generic 对齐 grok-build-auth；consent.referrer 仍置空。
 REDIRECT_URI = "http://127.0.0.1:56121/callback"
 GROK_REFERRER = "grok-build"
+CONSENT_REFERRER = ""
 GROK_PLAN = "generic"
 GROK_VERSION = "0.2.93"
 GROK_TOKEN_UA = f"grok-pager/{GROK_VERSION} grok-shell/{GROK_VERSION} (linux; x86_64)"
@@ -490,6 +491,22 @@ def _sso_principal_id(sso_cookie: str) -> str:
     return ""
 
 
+_PRINCIPAL_ID_RE = re.compile(
+    r"(?:userId|user_id|principalId|principal_id)\s*[\"']?\s*[:=]\s*[\"']([A-Za-z0-9_-]{8,128})",
+    re.I,
+)
+
+
+def _principal_id_from_response(body: str) -> str:
+    """Extract the authenticated user id embedded in an accounts response."""
+    normalized = str(body or "").replace(r'\"', '"')
+    for match in _PRINCIPAL_ID_RE.finditer(normalized):
+        value = str(match.group(1) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _device_authorized(url: str = "", body: str = "") -> bool:
     u = str(url or "").lower()
     b = str(body or "").lower()
@@ -685,6 +702,11 @@ def poll_device_token(
             if err in ("expired_token", "access_denied", "invalid_grant"):
                 desc = str(payload.get("error_description") or "").strip()
                 log(f"  ❌ device token 终态: {err} {desc}")
+                if desc.lower() == "access denied" or err == "access_denied":
+                    log(
+                        "  ℹ️ SSO 会话有效，但 xAI 拒绝签发 CLI/Build OAuth token；"
+                        "这属于账号授权资格或服务端策略，不是 SSO 字符串损坏"
+                    )
                 return None
             last_err = f"HTTP {r.status_code} err={err or str(r.text)[:120]}"
             log(f"  ⚠️ token 轮询: {last_err}")
@@ -786,6 +808,8 @@ def sso_to_token_device_flow(sso_cookie: str, proxy: str = "", log=print) -> dic
     if "sign-in" in final or "sign-up" in final or int(getattr(r, "status_code", 0) or 0) == 401:
         log("  ❌ sso 无效")
         return None
+    if not principal_id:
+        principal_id = _principal_id_from_response(str(getattr(r, "text", "") or ""))
     log("  ✅ sso 有效" + (f" principal_id={principal_id[:12]}..." if principal_id else "（协议路径）"))
 
     device = request_device_code(proxy=proxy, log=log, session=s)
@@ -903,6 +927,9 @@ def sso_to_token_auth_code(sso_cookie: str, proxy: str = "", log=print) -> dict 
     if "sign-in" in r.url or "sign-up" in r.url:
         log("  ❌ sso 无效")
         return None
+    principal_id = _sso_principal_id(sso_cookie) or _principal_id_from_response(
+        str(getattr(r, "text", "") or "")
+    )
     log("  ✅ sso 有效")
 
     verifier, challenge, state, nonce = _gen_pkce()
@@ -974,7 +1001,8 @@ def sso_to_token_auth_code(sso_cookie: str, proxy: str = "", log=print) -> dict 
         log(f"  [*] consent Next-Action 候选 {len(action_ids)} 个（首个 {action_ids[0][:12]}...）")
 
     # 2) 提交 consent（allow），拿 authorization code
-    # consent 也必须带 referrer=grok-build，否则 JWT claim 为 None
+    # The authorize request carries grok-build; the consent action expects an
+    # empty referrer and links back to the pending authorize transaction.
     consent_payload = json.dumps([{
         "action": "allow",
         "clientId": CLIENT_ID,
@@ -985,8 +1013,8 @@ def sso_to_token_auth_code(sso_cookie: str, proxy: str = "", log=print) -> dict 
         "codeChallengeMethod": "S256",
         "nonce": nonce,
         "principalType": "User",
-        "principalId": "",
-        "referrer": GROK_REFERRER,
+        "principalId": principal_id,
+        "referrer": CONSENT_REFERRER,
     }])
 
     code = None
@@ -1046,6 +1074,11 @@ def sso_to_token_auth_code(sso_cookie: str, proxy: str = "", log=print) -> dict 
                 # 是对的，问题在账号资质。再换 ID 或扫 JS chunk 都是白费。
                 _remember_working_next_action_id(action_id)
                 log(f"  ❌ consent 被服务端拒绝: {server_err}")
+                if server_err.lower() == "access denied":
+                    log(
+                        "     xAI 已确认授权请求有效但拒绝该账号的 CLI/Build 资格；"
+                        "无需继续更换 Next-Action"
+                    )
                 log("     （Next-Action 有效，属账号资质裁决，换 ID 重试无意义）")
                 return None
             # 200 但无 code 也无裁决：多半是别的 server action（如读用户信息）
