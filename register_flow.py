@@ -252,13 +252,20 @@ def _dismiss_cookie_consent(log_callback=None):
     try:
         dismissed = page.run_js(r"""
 // OneTrust: 点击 "Accept All" / "全部接受" 按钮
-const oneTrustBtn = document.querySelector('#onetrust-accept-btn-handler, #accept-recommended-btn-handler');
+// Prefer rejecting optional cookies; either choice removes the blocking banner.
+const oneTrustBtn = document.querySelector(
+    '#onetrust-reject-all-handler, #onetrust-accept-btn-handler, #accept-recommended-btn-handler'
+);
 if (oneTrustBtn) { oneTrustBtn.click(); return 'OneTrust'; }
 // 通用：查找带 "Accept" / "接受" / "同意" / "Agree" 文本的按钮
 const btns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+const exactLabels = new Set([
+    'reject all', 'reject all cookies', 'accept all', 'accept all cookies',
+    'accept', 'agree', '同意', '全部接受', '接受'
+]);
 for (const b of btns) {
-    const t = (b.innerText || b.textContent || '').trim().toLowerCase();
-    if (t === 'accept all' || t === 'accept' || t === 'agree' || t === '同意' || t === '全部接受' || t === '接受') {
+    const t = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (exactLabels.has(t)) {
         b.click(); return 'generic:' + t;
     }
 }
@@ -266,8 +273,9 @@ return '';
         """)
         if dismissed and log_callback:
             log_callback(f"[*] 已关闭 Cookie 横幅: {dismissed}")
+        return str(dismissed or "")
     except Exception:
-        pass
+        return ""
 
 
 

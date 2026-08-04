@@ -159,8 +159,68 @@ def test_email_form_is_retried_then_fails_with_specific_reason():
     assert any("resubmitted (3/3)" in line for line in state["logs"])
 
 
+def test_standard_form_submit_then_react_password_button_are_used():
+    state = {"phase": "email", "request_submits": 0, "js_clicks": 0, "native_clicks": 0}
+
+    class SubmitPage(FakePage):
+        def run_js(self, script):
+            if "form.requestSubmit" in script:
+                state["request_submits"] += 1
+                state["phase"] = "password"
+                return True
+            if "const labels = new Set" in script:
+                state["js_clicks"] += 1
+                return "Login"
+            return {
+                "invalid": False,
+                "rate": False,
+                "cf": False,
+                "verification": False,
+                "url": self.state.get("url", ""),
+            }
+
+    page = SubmitPage(state)
+    email_element = object()
+    password_element = object()
+
+    def candidates(kind):
+        if kind == "email" and state["phase"] == "email":
+            return [email_element]
+        if kind == "password" and state["phase"] == "password":
+            return [password_element]
+        return []
+
+    def native_click(*_args, **_kwargs):
+        state["native_clicks"] += 1
+        return "unexpected"
+
+    fake_browser = SimpleNamespace(active_page=lambda: page, refresh_active_page=lambda: page)
+    fake_flow = SimpleNamespace(
+        _dismiss_cookie_consent=lambda **_kwargs: "",
+        _native_input_candidates=candidates,
+        _native_type_element=lambda _element, _value: True,
+        _native_click_action=native_click,
+        _try_sync_turnstile=lambda **_kwargs: None,
+        wait_for_sso_cookie=lambda **_kwargs: "private-sso-token",
+    )
+    ticks = itertools.count(0, 1)
+    with patch.dict(sys.modules, {"browser_session": fake_browser, "register_flow": fake_flow}), patch.object(
+        account_login_flow.time, "monotonic", side_effect=lambda: next(ticks)
+    ), patch.object(account_login_flow, "_sleep", return_value=None):
+        sso = account_login_flow.login_and_extract_sso(
+            "person@example.test",
+            "private-password",
+        )
+
+    assert sso == "private-sso-token"
+    assert state["request_submits"] == 1
+    assert state["js_clicks"] == 1
+    assert state["native_clicks"] == 0
+
+
 if __name__ == "__main__":
     test_password_login_returns_sso_without_logging_secrets()
     test_email_verification_page_fails_with_specific_safe_diagnostic()
     test_email_form_is_retried_then_fails_with_specific_reason()
+    test_standard_form_submit_then_react_password_button_are_used()
     print("OK account login flow")
