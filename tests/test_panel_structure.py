@@ -228,9 +228,13 @@ def test_panel_security_and_recovery_structure():
     assert 'id="recovery-stop"' in html
     assert 'id="export-sso"' in html
     assert 'id="export-credentials"' in html
+    assert 'id="export-cpa-auth"' in html
+    assert 'id="export-grok2api-auth"' in html
     assert 'function downloadAccountExport(path)' in mon
     assert '/api/accounts/export-sso' in mon
     assert '/api/accounts/export-credentials-csv' in mon
+    assert '/api/accounts/export-cpa-auth' in mon
+    assert '/api/accounts/export-grok2api-auth' in mon
     assert 'id="run-status" aria-label="任务状态：加载中"' in html
     assert 'setAttribute("aria-label", "任务状态：" + runLabel)' in mon
     assert 'id="kpis" aria-label="核心指标" aria-live=' not in html

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add authenticated ZIP exports for all CPA and Grok2API credential files from their configured auth directories.
 - Treat an empty managed proxy pool as an explicit direct connection while keeping unhealthy configured pools fail-closed.
 - Add private imported-account management with unlimited account-count imports, configurable large POST bodies, password login, SSO extraction, optional CPA/Grok2API conversion, concurrent Docker/Xvfb workers, task controls, and secret-free API views.
 - Add a Docker-first deployment with baked Camoufox, Xvfb/browser dependencies, Compose health checks, strong panel authentication, unified `/data` persistence, and automated GHCR publishing.

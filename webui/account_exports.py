@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import os
 import time
+import zipfile
 from pathlib import Path
 
 from sso_to_auth_json import load_sso_records
@@ -12,6 +15,36 @@ from sso_to_auth_json import load_sso_records
 
 ROOT = Path(__file__).resolve().parent.parent
 ACCOUNTS_DIR = ROOT / "accounts"
+CONFIG_FILE = Path(
+    os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
+)
+CPA_AUTH_DIR = (
+    Path(os.environ["CPA_AUTH_DIR"])
+    if str(os.environ.get("CPA_AUTH_DIR") or "").strip()
+    else None
+)
+GROK2API_AUTH_DIR = (
+    Path(os.environ["GROK2API_AUTH_DIR"])
+    if str(os.environ.get("GROK2API_AUTH_DIR") or "").strip()
+    else None
+)
+
+_AUTH_EXPORTS = {
+    "cpa": {
+        "config_key": "cpa_auth_dir",
+        "default_dir": ROOT / "cpa_auth",
+        "pattern": "xai-*.json",
+        "filename_prefix": "grok-register-cpa-auth",
+        "empty_error": "没有可导出的 CPA 凭证",
+    },
+    "grok2api": {
+        "config_key": "grok2api_auth_dir",
+        "default_dir": ROOT / "grok2api_auth",
+        "pattern": "g2a-*.json",
+        "filename_prefix": "grok-register-grok2api-auth",
+        "empty_error": "没有可导出的 Grok2API 凭证",
+    },
+}
 
 
 def account_records() -> list:
@@ -63,3 +96,54 @@ def credentials_csv_export() -> tuple[str, bytes]:
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     body = ("\ufeff" + output.getvalue()).encode("utf-8")
     return f"grok-register-accounts-{timestamp}.csv", body
+
+
+def _auth_export_dir(kind: str) -> Path:
+    spec = _AUTH_EXPORTS.get(str(kind or "").strip().lower())
+    if spec is None:
+        raise ValueError(f"unknown auth export kind: {kind}")
+
+    explicit = CPA_AUTH_DIR if kind == "cpa" else GROK2API_AUTH_DIR
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+
+    try:
+        config = json.loads(CONFIG_FILE.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        config = {}
+    raw = str(config.get(spec["config_key"]) or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = CONFIG_FILE.parent / path
+        return path.resolve()
+    return Path(spec["default_dir"]).resolve()
+
+
+def auth_files_zip_export(kind: str) -> tuple[str, bytes]:
+    """Return a ZIP containing direct, non-symlink auth JSON files."""
+    normalized = str(kind or "").strip().lower()
+    spec = _AUTH_EXPORTS.get(normalized)
+    if spec is None:
+        raise ValueError(f"unknown auth export kind: {kind}")
+    auth_dir = _auth_export_dir(normalized)
+    try:
+        paths = sorted(
+            (
+                path
+                for path in auth_dir.glob(spec["pattern"])
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=lambda path: path.name.lower(),
+        )
+    except OSError:
+        paths = []
+    if not paths:
+        raise LookupError(spec["empty_error"])
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            archive.writestr(path.name, path.read_bytes())
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    return f"{spec['filename_prefix']}-{timestamp}.zip", output.getvalue()

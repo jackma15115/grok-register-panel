@@ -354,7 +354,7 @@ python grok_register_ttk.py
 | `GET /api/status` · `/api/stats` · `/api/control` · `/api/blacklist` · `/api/recovery` · `/api/proxies` · `/api/email-domains` | 配置了 Token 后必须鉴权 |
 | `POST /api/start` · `/api/stop` · `/api/control` · `/api/blacklist/reset` · `/api/recovery/*` · `/api/proxies/*` · `/api/email-domains/*` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
 | `PATCH /api/proxies/{id}` · `DELETE /api/proxies/{id}` · `PATCH/DELETE /api/email-domains/{id}` | 必须 `Authorization: Bearer <MONITOR_TOKEN>` |
-| `GET /api/accounts/export-sso` · `GET /api/accounts/export-credentials-csv` | 必须 `Authorization: Bearer <MONITOR_TOKEN>`；未配置 Token 时也拒绝 |
+| `GET /api/accounts/export-sso` · `GET /api/accounts/export-credentials-csv` · `GET /api/accounts/export-cpa-auth` · `GET /api/accounts/export-grok2api-auth` | 必须 `Authorization: Bearer <MONITOR_TOKEN>`；未配置 Token 时也拒绝 |
 | `GET /api/account-login` · `POST /api/account-login/*` | 始终要求有效 Token；GET 也不允许匿名，因为会返回完整邮箱地址 |
 
 前端 `api()` 会从 Token 输入框 / `localStorage.MONITOR_TOKEN` / `window.MONITOR_TOKEN` 自动带头。
@@ -417,7 +417,8 @@ python grok_register_ttk.py
 - 补录记录有邮箱时按邮箱（忽略大小写）去重，无邮箱时按 SSO 去重；同邮箱补录成功后会清理队列中的全部重复快照
 - **导出 SSO**：汇总账号文件与 `sso_pending.txt`，去重后每行导出一个 SSO；明确排除 `sso_risk_rejected.txt`
 - **导出账号 CSV**：导出 `email,passwd` 两列，使用 UTF-8 BOM 和标准 CSV 转义，便于表格软件直接打开
-- 两个导出接口始终要求匹配 `MONITOR_TOKEN`，即使普通读取接口允许匿名也不会放宽
+- **导出 CPA / Grok2API 凭证**：分别将配置目录中的 `xai-*.json` 或 `g2a-*.json` 打包为 ZIP；不会混入其它 JSON、日志或队列文件
+- 四个导出接口始终要求匹配 `MONITOR_TOKEN`，即使普通读取接口允许匿名也不会放宽
 - 补录运行在独立子进程，面板可查看数量、上次结果和停止任务
 - 命令行等价入口：
 

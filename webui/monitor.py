@@ -53,7 +53,11 @@ try:
         save_email_provider_config,
         test_email_provider_config,
     )
-    from webui.account_exports import credentials_csv_export, sso_export
+    from webui.account_exports import (
+        auth_files_zip_export,
+        credentials_csv_export,
+        sso_export,
+    )
     from webui.account_login_ops import (
         account_login_status,
         delete_imported_accounts,
@@ -98,7 +102,11 @@ except ImportError:  # running as script from webui/
         save_email_provider_config,
         test_email_provider_config,
     )
-    from account_exports import credentials_csv_export, sso_export  # type: ignore
+    from account_exports import (  # type: ignore
+        auth_files_zip_export,
+        credentials_csv_export,
+        sso_export,
+    )
     from account_login_ops import (  # type: ignore
         account_login_status,
         delete_imported_accounts,
@@ -2289,6 +2297,8 @@ HTML = r"""<!DOCTYPE html>
         <button id="recovery-accounts" onclick="startRecovery('accounts')">扫描全部账号</button>
         <button id="export-sso" onclick="downloadAccountExport('/api/accounts/export-sso')" title="每行一个 SSO，包含待授权记录">导出 SSO</button>
         <button id="export-credentials" onclick="downloadAccountExport('/api/accounts/export-credentials-csv')" title="导出全部账号的 email、passwd 列">导出账号 CSV</button>
+        <button id="export-cpa-auth" onclick="downloadAccountExport('/api/accounts/export-cpa-auth')" title="打包导出全部 xai-*.json CPA 凭证">导出 CPA 凭证</button>
+        <button id="export-grok2api-auth" onclick="downloadAccountExport('/api/accounts/export-grok2api-auth')" title="打包导出全部 g2a-*.json Grok2API 凭证">导出 Grok2API 凭证</button>
         <button class="danger" id="recovery-stop" onclick="stopRecovery()">停止补录</button>
       </div>
     </div>
@@ -3835,16 +3845,25 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/health":
             self._json(200, {"ok": True})
             return
-        if u.path in ("/api/accounts/export-sso", "/api/accounts/export-credentials-csv"):
+        if u.path in (
+            "/api/accounts/export-sso",
+            "/api/accounts/export-credentials-csv",
+            "/api/accounts/export-cpa-auth",
+            "/api/accounts/export-grok2api-auth",
+        ):
             if not self._require_write():
                 return
             try:
                 if u.path.endswith("export-sso"):
                     filename, body = sso_export()
                     content_type = "text/plain; charset=utf-8"
-                else:
+                elif u.path.endswith("export-credentials-csv"):
                     filename, body = credentials_csv_export()
                     content_type = "text/csv; charset=utf-8"
+                else:
+                    kind = "cpa" if u.path.endswith("export-cpa-auth") else "grok2api"
+                    filename, body = auth_files_zip_export(kind)
+                    content_type = "application/zip"
                 self._send(
                     200,
                     body,
