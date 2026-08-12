@@ -47,6 +47,8 @@ import browser_session as _bs
 import register_flow as _rf
 import connectivity as _conn
 from batch_supervisor import mark_slot_completed
+from batch_traffic import mark_successful_account
+from retry_policy import proxy_boot_rotations, slot_retries
 from secure_files import (
     append_private_text,
     atomic_write_json,
@@ -349,11 +351,14 @@ def record_register_result(
     worker: str = "",
     bot_flag=None,
     risk=None,
+    bfs=None,
+    bfs_value=None,
     log_callback=None,
 ) -> dict:
     """记录单次注册结果 + 出口 IP（控制台一行 + jsonl）。
 
     status: ok / fail / risk / sso_timeout / browser / other
+    bfs: True/False/None — JWT claim 检测（与 botFlagSource 不同）
     """
     import json as _json
     from datetime import datetime, timezone
@@ -399,11 +404,18 @@ def record_register_result(
         "port": port,
         "bot_flag": bot_flag,
         "risk": risk,
+        "bfs": bfs,
+        "bfs_value": bfs_value,
     }
+    bfs_txt = "-"
+    if bfs is True:
+        bfs_txt = f"yes:{bfs_value}" if bfs_value is not None else "yes"
+    elif bfs is False:
+        bfs_txt = "clean"
     line = (
         f"[结果] status={status} ip={exit_ip or '?'} port={port or '?'} "
         f"email={mask_email(email) if email else '-'} kind={kind or '-'} bot={bot_flag if bot_flag is not None else '-'} "
-        f"risk={risk if risk is not None else '-'}"
+        f"risk={risk if risk is not None else '-'} bfs={bfs_txt}"
     )
     if log_callback:
         try:
@@ -488,6 +500,18 @@ def load_config():
         except Exception:
             config = DEFAULT_CONFIG.copy()
     return config
+
+
+def _sleep_cancelable(seconds, should_stop=None) -> None:
+    """Sleep in short slices so stop flags can interrupt account gaps."""
+    end = time.time() + max(0.0, float(seconds or 0))
+    while time.time() < end:
+        if callable(should_stop) and should_stop():
+            return
+        remaining = end - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
 
 
 def parse_account_interval() -> float:
@@ -681,10 +705,19 @@ def record_proxy_boot_failure(proxy: str, exc) -> None:
         pass
 
 
-_MAIL_DIRECT_MARKERS = (
-    "mail-api.example.com",
-    "hermaly.com",
-    "example.com",
+def _record_proxy_precheck_failure(proxy: str, checks) -> bool:
+    for name, ok, detail in checks or []:
+        if name != _conn.XAI_SIGNUP_CHECK_NAME or ok:
+            continue
+        record_proxy_boot_failure(
+            proxy,
+            RuntimeError(f"xAI registration-page precheck failed: {detail}"),
+        )
+        return True
+    return False
+
+
+_MAIL_DIRECT_PATH_MARKERS = (
     "/admin/new_address",
     "/api/mails",
     "/api/mail/",
@@ -694,7 +727,17 @@ _MAIL_DIRECT_MARKERS = (
 
 def _url_needs_direct(url: str) -> bool:
     u = str(url or "").lower()
-    return any(m in u for m in _MAIL_DIRECT_MARKERS)
+    configured_bases = (
+        config.get("cloudflare_api_base"),
+        config.get("cloudmail_url"),
+        config.get("moemail_api_base"),
+        config.get("duckmail_api_base"),
+    )
+    for value in configured_bases:
+        base = str(value or "").strip().lower().rstrip("/")
+        if base and (u == base or u.startswith(base + "/")):
+            return True
+    return any(marker in u for marker in _MAIL_DIRECT_PATH_MARKERS)
 
 
 def _apply_mail_direct(url, request_kwargs: dict) -> dict:
@@ -770,6 +813,17 @@ def _pick_list_payload(data):
     return _pick_list(data)
 
 
+def cloudflare_randomize_subdomain_enabled() -> bool:
+    """主域易被风控时挂随机子域（需 CF Email Routing 对 *.apex catch-all）。
+
+    配置 cloudflare_randomize_subdomain：true/false，默认 true。
+    """
+    raw = config.get("cloudflare_randomize_subdomain", True)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "1").strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def cloudflare_create_temp_address(api_base, domain=""):
     selected_domain = str(domain or "").strip() or cloudflare_next_default_domain()
     return cloudflare_provider.create_temp_address(
@@ -781,7 +835,8 @@ def cloudflare_create_temp_address(api_base, domain=""):
         auth_mode=get_cloudflare_auth_mode(),
         custom_auth=get_cloudflare_custom_auth(),
         name=generate_username(10),
-        randomize_subdomain=not bool(domain),
+        # 有管理域名时也默认随机子域，避免根域被批量风控
+        randomize_subdomain=cloudflare_randomize_subdomain_enabled(),
     )
 
 
@@ -886,6 +941,19 @@ def _append_sso_risk_rejected(email: str, sso: str, details: str, log_callback=N
     except Exception as exc:
         if log_callback:
             log_callback(f"[CPA] 保存注册风控拒绝记录失败: {exc}")
+
+
+def _append_sso_bfs_flagged(email: str, sso: str, details: str, log_callback=None):
+    """保存 JWT bfs 标记账号（access_token/sso 含 bfs claim）。"""
+    try:
+        path = accounts_side_file("sso_bfs_flagged.txt")
+        safe_details = re.sub(r"[\r\n\t]+", " ", str(details or "")).strip()
+        append_private_text(path, f"{email}----{sso}----{safe_details}\n")
+        if log_callback:
+            log_callback(f"[CPA] 已保存 bfs 标记记录 → {path}")
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[CPA] 保存 bfs 标记记录失败: {exc}")
 
 
 def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
@@ -1032,11 +1100,69 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             _cpa_log("换 token 失败；SSO 已在 accounts 文件，稍后可重转")
             _append_sso_pending(email, sso, log_callback=log_callback)
             return False
-        record = _s2cpa.token_to_cpa_record(token, email=email, sso=sso)
+
+        # JWT bfs 检测（与 botFlagSource 独立；key 存在即标记）
+        bfs_check = config.get("bfs_check", True)
+        if isinstance(bfs_check, str):
+            bfs_check = bfs_check.strip().lower() not in ("0", "false", "no", "off")
+        bfs_info = {"ok": False, "has_bfs": False, "bfs": None, "source": ""}
+        if bfs_check:
+            bfs_info = _s2cpa.inspect_token_bundle_bfs(
+                access_token=str(token.get("access_token") or ""),
+                sso=sso,
+                id_token=str(token.get("id_token") or ""),
+                refresh_token=str(token.get("refresh_token") or ""),
+            )
+            skip_cpa = config.get("bfs_skip_cpa", False)
+            if isinstance(skip_cpa, str):
+                skip_cpa = skip_cpa.strip().lower() in ("1", "true", "yes", "on")
+            if not bfs_info.get("ok"):
+                _cpa_log("JWT bfs 检测: unknown（无法解码 token）")
+                if skip_cpa:
+                    _append_sso_pending(email, sso, log_callback=log_callback)
+                    _cpa_log("bfs_skip_cpa=true，未知状态不写入 CPA/Grok2API，已进入待重转队列")
+                    return False
+            elif bfs_info.get("has_bfs"):
+                detail = (
+                    f"bfs={bfs_info.get('bfs')!r} source={bfs_info.get('source') or '-'}"
+                )
+                _cpa_log(f"JWT bfs 标记: {detail}")
+                _append_sso_bfs_flagged(email, sso, detail, log_callback=log_callback)
+                if skip_cpa:
+                    _cpa_log("bfs_skip_cpa=true，跳过 CPA/Grok2API 写入")
+                    try:
+                        record_register_result(
+                            "ok",
+                            email or "",
+                            kind="bfs_flagged",
+                            detail=detail,
+                            bfs=True,
+                            bfs_value=bfs_info.get("bfs"),
+                            log_callback=log_callback,
+                        )
+                    except Exception:
+                        pass
+                    return False
+            else:
+                _cpa_log("JWT bfs 检测: clean")
+
+        record = _s2cpa.token_to_cpa_record(
+            token,
+            email=email,
+            sso=sso,
+            bfs_info=bfs_info if bfs_check else None,
+            check_bfs=bool(bfs_check),
+        )
         ap = _s2cpa.decode_jwt_payload(record.get("access_token", ""))
         ref = ap.get("referrer")
         if ref:
             _cpa_log(f"access_token referrer={ref!r}")
+        disable_bfs = config.get("bfs_disable_cpa", False)
+        if isinstance(disable_bfs, str):
+            disable_bfs = disable_bfs.strip().lower() in ("1", "true", "yes", "on")
+        if disable_bfs and record.get("bfs") is True:
+            record["disabled"] = True
+            _cpa_log("bfs 账号已标记 disabled=true")
         wrote_ok = False
         if auth_dir:
             try:
@@ -1063,6 +1189,20 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             _cpa_log("token 已换出但 CPA/Grok2API 均未写入成功")
             _append_sso_pending(email, sso, log_callback=log_callback)
             return False
+        # 成功写入后把 bfs 记入结果日志（ok 状态由上层注册成功路径再记一次时可能覆盖；此处补一条细节）
+        if bfs_check and bfs_info.get("has_bfs"):
+            try:
+                record_register_result(
+                    "ok",
+                    email or "",
+                    kind="bfs_flagged",
+                    detail=f"bfs={bfs_info.get('bfs')!r} written",
+                    bfs=True,
+                    bfs_value=bfs_info.get("bfs"),
+                    log_callback=log_callback,
+                )
+            except Exception:
+                pass
         return True
     except Exception as exc:
         _cpa_log(f"直出失败: {redact_sensitive_log_line(str(exc))}")
@@ -1691,9 +1831,15 @@ def get_email_and_token(api_key=None):
                     auth_mode=get_cloudflare_auth_mode(),
                     custom_auth=get_cloudflare_custom_auth(),
                     domain=managed_domain,
+                    randomize_subdomain=cloudflare_randomize_subdomain_enabled(),
                 )
-            except Exception:
-                raise Exception(f"Cloudflare 创建邮箱失败: {primary_exc}")
+            except Exception as fallback_exc:
+                primary_message = redact_sensitive_log_line(str(primary_exc))[:240]
+                fallback_message = redact_sensitive_log_line(str(fallback_exc))[:240]
+                raise Exception(
+                    "Cloudflare 创建邮箱失败: "
+                    f"{primary_message} | fallback: {fallback_message}"
+                ) from primary_exc
     if provider == "mailnest":
         return mailnest_buy_email(), "_"
     return duckmail_provider.create_mailbox(
@@ -2995,7 +3141,9 @@ class GrokRegisterGUI:
             return
         if self._queue_ui_call(self.log, message):
             return
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        from runtime_platform import beijing_strftime
+
+        timestamp = beijing_strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         append_session_log(line)
         print(line, flush=True)
@@ -3387,7 +3535,7 @@ class GrokRegisterGUI:
             wlog("[*] 浏览器已启动")
             i = 0
             retry_count_for_slot = 0
-            max_slot_retry = 3
+            max_slot_retry = slot_retries()
             while i < count:
                 if self.should_stop():
                     break
@@ -3445,7 +3593,10 @@ class GrokRegisterGUI:
                     wlog(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
                     wlog("[*] 5. 等待 sso cookie")
                     sso = wait_for_sso_cookie(
-                        log_callback=wlog, cancel_callback=self.should_stop
+                        log_callback=wlog,
+                        cancel_callback=self.should_stop,
+                        email=email,
+                        password=profile.get("password", ""),
                     )
                     ensure_sso_oauth_eligible(sso, email=email, log_callback=wlog)
                     if config.get("enable_nsfw", True):
@@ -3576,7 +3727,9 @@ class CliStopController:
 def cli_log(message):
     if not should_emit_log(message):
         return
-    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    from runtime_platform import beijing_strftime
+
+    timestamp = beijing_strftime("%H:%M:%S")
     line = f"[{timestamp}] {message}"
     append_session_log(line)
     print(line, flush=True)
@@ -3604,7 +3757,8 @@ def run_registration_cli(count):
     fail_count = 0
     fail_stats = empty_fail_stats()
     retry_count_for_slot = 0
-    max_slot_retry = 3
+    max_slot_retry = slot_retries()
+    max_proxy_boot_rotations = proxy_boot_rotations()
     accounts_output_file = ""  # 已改为按邮箱单独保存，不再使用批量文件
     workers = max(1, min(int(config.get("register_workers", 1) or 1), 24, int(count or 1)))
     pool = load_proxy_pool()
@@ -3634,17 +3788,30 @@ def run_registration_cli(count):
                 f"{redact_sensitive_log_line(detail)}"
             )
         if _conn.has_blocking_xai_failure(startup_checks):
-            cli_log("[!] xAI 注册页被 Cloudflare 拦截，已停止建号；请更换当前 proxy 后重试")
+            _record_proxy_precheck_failure(
+                str(startup_config.get("proxy") or ""),
+                startup_checks,
+            )
+            cli_log("[!] xAI 注册页预检失败，已停止当前批次；请检查或更换当前 proxy 后重试")
             try:
                 signal.signal(signal.SIGINT, _prev_sigint)
             except Exception:
                 pass
-            return
+            _conn.require_xai_signup(startup_checks)
+    except _conn.XaiSignupPrecheckFailed:
+        raise
     except Exception as exc:
         cli_log(
-            f"[!] 启动连通性检查异常，继续注册: "
+            f"[!] 启动连通性检查异常，已停止当前批次: "
             f"{redact_sensitive_log_line(str(exc))}"
         )
+        try:
+            signal.signal(signal.SIGINT, _prev_sigint)
+        except Exception:
+            pass
+        raise _conn.XaiSignupPrecheckFailed(
+            "xAI registration page precheck raised an exception"
+        ) from exc
 
     def _cli_record_failure(exc):
         nonlocal fail_count
@@ -3687,7 +3854,7 @@ def run_registration_cli(count):
                     # 黑名单/死代理：多换几条 sticky 再放弃
                     booted = False
                     last_boot = boot_exc
-                    for _try in range(1, 12):
+                    for _try in range(1, max_proxy_boot_rotations + 1):
                         msgb = str(last_boot)
                         if not (
                             "出口IP命中黑名单" in msgb
@@ -3730,6 +3897,7 @@ def run_registration_cli(count):
                 retry = 0
                 worker_stop = False
                 while i < n and not controller.should_stop() and not worker_stop:
+                    email = ""
                     try:
                         open_signup_page(
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
@@ -3752,6 +3920,8 @@ def run_registration_cli(count):
                         sso = wait_for_sso_cookie(
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                             cancel_callback=controller.should_stop,
+                            email=email,
+                            password=profile.get("password", ""),
                         )
                         ensure_sso_oauth_eligible(
                             sso,
@@ -3783,6 +3953,7 @@ def run_registration_cli(count):
                             sso, email=email, log_callback=lambda m: cli_log(f"[W{wid+1}] {m}")
                         )
                         local_success += 1
+                        mark_successful_account()
                         i += 1
                         retry = 0
                         if cpa_ok:
@@ -3940,7 +4111,7 @@ def run_registration_cli(count):
                                     )
                                     worker_stop = True
                                 else:
-                                    for _try in range(1, 10):
+                                    for _try in range(1, max_proxy_boot_rotations + 1):
                                         msgb = str(last_boot)
                                         if not (
                                             "出口IP命中黑名单" in msgb
@@ -4013,7 +4184,10 @@ def run_registration_cli(count):
     try:
         single_rotate_idx = 0
         last_boot = None
-        boot_attempts = max(1, min(12, len(pool) or 1))
+        boot_attempts = max(
+            1,
+            min(max_proxy_boot_rotations + 1, len(pool) or 1),
+        )
         for _boot_try in range(boot_attempts):
             px = ""
             try:
@@ -4101,7 +4275,10 @@ def run_registration_cli(count):
                 cli_log(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
                 cli_log("[*] 5. 等待 sso cookie")
                 sso = wait_for_sso_cookie(
-                    log_callback=cli_log, cancel_callback=controller.should_stop
+                    log_callback=cli_log,
+                    cancel_callback=controller.should_stop,
+                    email=email,
+                    password=profile.get("password", ""),
                 )
                 ensure_sso_oauth_eligible(sso, email=email, log_callback=cli_log)
                 if config.get("enable_nsfw", True):
@@ -4124,6 +4301,7 @@ def run_registration_cli(count):
                     raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
                 cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=cli_log)
                 success_count += 1
+                mark_successful_account()
                 retry_count_for_slot = 0
                 i += 1
                 if cpa_ok:

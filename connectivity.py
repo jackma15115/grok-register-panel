@@ -15,6 +15,10 @@ XAI_SIGNUP_CHECK_NAME = "xAI注册页"
 XAI_SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
 
+class XaiSignupPrecheckFailed(RuntimeError):
+    """The registration page was not reachable through the selected proxy."""
+
+
 def _tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
     s = socket.socket()
     s.settimeout(timeout)
@@ -113,6 +117,11 @@ def has_blocking_xai_failure(results: List[CheckResult]) -> bool:
     return any(name == XAI_SIGNUP_CHECK_NAME and not ok for name, ok, _ in results)
 
 
+def require_xai_signup(results: List[CheckResult]) -> None:
+    if has_blocking_xai_failure(results):
+        raise XaiSignupPrecheckFailed("xAI registration page precheck failed")
+
+
 def check_email_api(provider: str, config: dict, http_get: Callable, http_post: Callable) -> CheckResult:
     provider = (provider or "").strip().lower()
     try:
@@ -130,25 +139,28 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
             if not accounts_path.startswith("/"):
                 accounts_path = "/" + accounts_path
 
-            auth_is_none = auth_mode.lower() == "none"
+            admin_create = cloudflare_provider.is_admin_create_path(accounts_path)
+            direct_create = not admin_create
+            admin_header_create = admin_create and auth_mode.lower() == "x-admin-auth"
 
-            if auth_is_none:
-                # 直建模式：建号走 /new_address，不依赖 domains 端点。
-                # 不发 HTTP 请求到 domains（避免 401 困扰），只验证服务器是否在线。
+            if direct_create or admin_header_create:
+                # 直建端点不使用管理密钥；/admin/new_address 则使用
+                # x-admin-auth，而 domains 通常要邮箱 JWT。两者都不能用 domains
+                # 做无副作用鉴权预检；POST 建号会产生数据，因此只做 TCP。
                 parsed = urlparse(base)
                 host = parsed.hostname
                 if host:
                     port = parsed.port or (443 if parsed.scheme == "https" else 80)
                     if not _tcp_open(host, port):
                         return "邮箱API", False, f"Cloudflare 服务不可达: {host}:{port}"
-                note = ""
+                mode_label = "管理员建号" if admin_header_create else "直建"
                 return (
                     "邮箱API",
                     True,
-                    f"Cloudflare 直建模式可用（建号端点 {accounts_path}）",
+                    f"Cloudflare {mode_label}模式可用（建号端点 {accounts_path}）",
                 )
 
-            # auth_mode != none：检查 domains 鉴权是否正确
+            # 其他鉴权模式：检查 domains 鉴权是否正确。
             path = str(config.get("cloudflare_path_domains", "/api/domains") or "/api/domains")
             if not path.startswith("/"):
                 path = "/" + path

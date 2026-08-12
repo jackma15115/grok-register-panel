@@ -79,6 +79,8 @@ def test_compact_overview_density():
 def test_help_and_faq_module():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
     html = mon.split('HTML = r"""', 1)[1].split('"""', 1)[0]
+    assert 'html {\n    overflow-x: clip;' in html
+    assert 'body {\n    overflow-x: clip;' in html
     assert 'id="dashboard-view"' in html
     assert 'id="help-view"' in html
     assert 'id="help-view-toggle"' in html
@@ -94,8 +96,10 @@ def test_help_and_faq_module():
     assert 'body.help-view-open #dashboard-view > :not(#help-view) { display: none; }' in html
     assert 'role="tablist"' in html
     assert 'id="faq-search"' in html
-    assert len(re.findall(r'<details class="faq-item" data-faq-item', html)) == 13
+    assert len(re.findall(r'<details class="faq-item" data-faq-item', html)) == 14
     assert 'policy=deny' in html
+    assert 'bfs' in html.lower()
+    assert 'id="bfs-title"' in html
     assert '账号补录' in html
     assert '成功项会从待补录队列移除' in html
     assert 'permission-denied' in html
@@ -134,6 +138,34 @@ def test_proxy_pool_panel_structure():
     assert 'pool = load_proxy_pool()' in worker
     assert '面板代理池没有健康且启用的代理' in worker
     assert 'redact_proxy(px)' in worker
+
+def test_stats_refresh_persists_across_snapshot_polling():
+    mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    assert 'let lastFullStats = null;' in mon
+    assert 'lastFullStats = Object.assign({}, lastFullStats || {}, j || {});' in mon
+    assert 'function renderStats(s, opts)' in mon
+    assert 'if (opts.liveMerge && lastFullStats)' in mon
+    assert 'renderStats({' in mon
+    assert '}, { liveMerge: true });' in mon
+    assert 'setInterval(() => refreshStats(false), 30000);' in mon
+
+def test_batch_traffic_metric_structure():
+    mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    runner = (ROOT / 'run_batch_headless.py').read_text(encoding='utf-8')
+    assert '"traffic": traffic' in mon
+    assert '"traffic_summary": traffic_summary' in mon
+    assert 'if int(traffic.get("version") or 0) < 2:' in mon
+    assert 'function formatBytes(value)' in mon
+    assert '["本批代理流量"' in mon
+    assert '["每批平均流量"' in mon
+    assert '["每个成功号平均流量"' in mon
+    assert 'trafficSummary.bytes_per_batch' in mon
+    assert 'trafficSummary.bytes_per_success' in mon
+    assert '" / 上行 " + formatBytes(traffic.bytes_up)' in mon
+    assert '" / 下行 " + formatBytes(traffic.bytes_down)' in mon
+    assert 'archive_batch(history_file, finalized)' in runner
+    assert 'GROK_STATIC_ASSET_CACHE' in mon
+    assert 'static-asset-cache' in mon
 
 def test_email_service_and_domain_rotation_panel_structure():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
@@ -254,6 +286,8 @@ if __name__ == '__main__':
     test_reference_motion_and_reduced_motion()
     test_compact_overview_density()
     test_help_and_faq_module()
+    test_stats_refresh_persists_across_snapshot_polling()
+    test_batch_traffic_metric_structure()
     test_proxy_pool_panel_structure()
     test_email_service_and_domain_rotation_panel_structure()
     test_panel_security_and_recovery_structure()

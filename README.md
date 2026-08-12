@@ -5,13 +5,11 @@
 Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (MIT).
 
 批量注册 Grok 账号（Camoufox）+ Web 监控面板  
-启停 / 并发 / ASN 黑名单 / 1h·3h·12h 成功率 / **Token 鉴权**
+任务编排 / 代理池 / 邮箱服务 / 域名轮换 / 账号补录 / BFS 检测 / **Token 鉴权**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)
 ![Stars](https://img.shields.io/github/stars/lij768423-svg/grok-register-panel?style=flat)
-
-**仓库：** https://github.com/lij768423-svg/grok-register-panel
 
 </div>
 
@@ -24,17 +22,20 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 能力 | 说明 |
 |------|------|
 | 注册全链路 | 邮箱 OTP → 资料页 → Turnstile → SSO → Device / OAuth → 写入 CPA / Grok2API |
-| 多邮箱后端 | Cloudflare Worker 邮、DuckMail、YYDS、MailNest、CloudMail 等 |
+| 多邮箱后端 | Cloudflare Worker 邮、DuckMail、YYDS、MailNest、CloudMail、MoeMail；面板内切换、保存和连通性测试 |
 | 反检测浏览器 | [Camoufox](https://camoufox.com/)（Gecko 层指纹） |
 | 出口预检 | 启动前解析出口 IP / ASN，命中黑名单直接换口 |
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
+| **BFS 检测** | 解码 access_token / SSO JWT，检查是否含 `bfs` claim（与 botFlag 独立）；注册后自动标记，面板可批量扫描 CPA |
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
-| **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率和账号补录；操作 API 需 `MONITOR_TOKEN` |
+| **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率、本批代理流量、账号补录和 BFS 扫描；操作 API 需 `MONITOR_TOKEN` |
 | 导入账号登录 | 导入 `email + password`，浏览器登录 xAI 后提取 SSO，并可继续写入 CPA / Grok2API |
 | 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
 | 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
 | Docker 镜像 | Compose 一键运行；镜像内置 Camoufox、Xvfb 与浏览器依赖，`/data` 统一持久化 |
+| 安全静态缓存 | 面板任务默认复用 JS / CSS / 字体 / 图片等 GET 静态资源；不缓存文档、接口、WebSocket 或 Turnstile |
+| 批次流量计量 | 在现有 HTTP 代理前增加仅监听本机的临时计量层，展示本批上行、下行与总量，不保存代理地址或凭据 |
 | 安全存储 | 代理、账号、SSO、日志、auth 与运行状态默认使用 owner-only 权限 |
 
 ## 界面预览
@@ -44,7 +45,27 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
   <img alt="Grok Register 注册控制台" src="docs/screenshots/dashboard-light.png">
 </picture>
 
-控制台集中展示任务参数、批次进度、时段成功率、账号补录和黑名单状态；图片会跟随 GitHub 的深浅主题自动切换。
+控制台集中展示任务参数、批次进度、时段成功率、账号补录、BFS 扫描和黑名单状态。
+
+<details>
+<summary><strong>代理池：批量导入、探活、冷却和出口质量</strong></summary>
+<br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/proxy-pool-dark.png">
+  <img alt="Grok Register 外部代理池" src="docs/screenshots/proxy-pool-light.png">
+</picture>
+</details>
+
+<details>
+<summary><strong>邮箱服务：六种 provider 与高级域名轮换</strong></summary>
+<br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/email-service-dark.png">
+  <img alt="Grok Register 邮箱服务与域名轮换" src="docs/screenshots/email-service-light.png">
+</picture>
+</details>
+
+以上图片使用脱敏示例数据，并会跟随 GitHub 的深浅主题自动切换。
 
 ## 架构示意
 
@@ -162,6 +183,7 @@ sudo apt-get install -y libtk8.6 xvfb xauth
 | `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` |
 | `defaultDomains` | 临时邮域名（如二级 CF 域） |
 | `cloudflare_*` / `duckmail_*` 等 | 对应邮箱 API |
+| `cloudflare_randomize_subdomain` | 默认 `true`；为管理域名生成随机子域，要求泛域收信；不支持时设为 `false` |
 | `moemail_api_base` | MoeMail 站点根 URL，例如 `https://mail.example.com` |
 | `moemail_api_key` | MoeMail OpenAPI 的 `X-API-Key` |
 | `moemail_domain` | 可选固定域名；留空时自动读取 `/api/config` 的可用域名 |
@@ -191,9 +213,14 @@ sudo apt-get install -y libtk8.6 xvfb xauth
 | `BATCH_LOG` | 自动发现最新 `log/batch*.log` | 面板跟踪的日志 |
 | `BLACKLIST_STATE_FILE` | `./log/blacklist_state.json` | 运行时 ASN 黑名单状态 |
 | `GROK_BATCH_IDLE_TIMEOUT` | `360` | batch 子进程连续无输出多少秒后自动重建（最小 60 秒） |
-| `GROK_BATCH_MAX_RESTARTS` | `8` | 单批发生驱动崩溃或卡死时最多自动恢复次数 |
+| `GROK_BATCH_MAX_RESTARTS` | `2` | 单批发生驱动崩溃或卡死时最多自动恢复次数 |
+| `GROK_BROWSER_START_ATTEMPTS` | `2` | 同一代理的 Camoufox 启动尝试次数，范围 1-4 |
+| `GROK_PROXY_BOOT_ROTATIONS` | `3` | 浏览器启动失败后最多更换的代理数，范围 0-10 |
+| `GROK_SLOT_RETRIES` | `1` | 单账号槽位软失败时的重试次数，范围 0-3 |
+| `GROK_ORCH_MAX_CONSECUTIVE_FAILURES` | `2` | 连续异常批次达到该值时停止编排，范围 1-10 |
 | `GROK_PYTHON_BIN` | 项目 `.venv` 或当前解释器 | 可选：显式指定面板启动任务所用的 Python，支持项目外共享虚拟环境 |
 | `GROK_USE_XVFB` | `auto` | `auto`：仅 Linux 无显示时启用；`1`：Linux 强制启用；`0`：直接启动 |
+| `GROK_COMPAT_PROCESS_ROOTS` | （空） | 可选：用系统路径分隔符列出旧 release 绝对目录；新面板会精确识别其在途任务，避免切版后重复启动 |
 | `PROXY_POOL_STATE_FILE` | `./log/proxy_pool.json` | 外部代理池凭据、健康与冷却状态，文件权限 `0600` |
 | `PROXY_NETWORK_COOLDOWN_SECONDS` | `90` | 运行时网络异常的短冷却秒数 |
 | `PROXY_RISK_COOLDOWN_SECONDS` | `1800` | 注册风控后的长冷却秒数 |
@@ -204,6 +231,9 @@ sudo apt-get install -y libtk8.6 xvfb xauth
 | `MONITOR_MAX_REQUEST_BODY` | `16777216`（16 MiB） | 面板 JSON POST 请求体上限；导入账号数量不设条数上限，可按部署内存调高 |
 | `NEXT_ACTION_CACHE_FILE` | `./.next_action_id.cache` | Docker 中持久化到 `/data/.next_action_id.cache` |
 | `GROK_REGISTER_BROWSER_AUTO_FETCH` | `1` | 镜像内浏览器缓存缺失时自动补拉；正常构建的镜像已预装 |
+| `GROK_STATIC_ASSET_CACHE` | 面板任务为 `1`，CLI 为空 | 面板启动链默认启用；命令行直启可设为 `1`，显式设 `0` 可关闭 |
+| `GROK_STATIC_CACHE_DIR` | `./log/static-asset-cache` | 静态缓存目录，文件权限 `0700` |
+| `GROK_STATIC_CACHE_MAX_MB` | `1024` | 静态缓存上限（MB），最低 `32` |
 
 生成 token 示例：
 
@@ -237,6 +267,27 @@ python webui/monitor.py
 4. 需要多出口时打开顶部 **代理池**，导入代理并等待检测完成
 5. 打开顶部 **邮箱服务**，选择 provider、填写对应参数，保存后执行一次连接测试
 6. 需要多个自有收信域名轮换时，再展开 **域名轮换 · 高级设置** 导入域名并保存规则
+
+### 静态资源缓存与批次流量
+
+从 Live 面板启动的单批和持续编排默认启用静态缓存。直接从命令行启动时，需要在标准命令上增加环境变量：
+
+```bash
+GROK_STATIC_ASSET_CACHE=1 \
+GROK_STATIC_CACHE_DIR="$PWD/log/static-asset-cache" \
+  xvfb-run -a python -u run_batch_headless.py 1 1
+```
+
+也可直接使用兼容入口 `run_batch_headless_static_cache.py` 或 `run_until_100_static_cache.py`。
+
+缓存只处理 GET 静态资源；文档、XHR/fetch、WebSocket、Turnstile 和账号相关请求始终直连。
+
+每个批次还会自动生成 `log/batch_traffic.json`。注册浏览器使用 HTTP/HTTPS
+代理时，项目会在原代理前启动独立的 `127.0.0.1` 计量转发器，面板据此展示
+真实上行、下行与总字节数。批次结束后还会把聚合结果写入 owner-only 的
+`log/batch_traffic_history.json`（最多 500 批），用于展示每批平均流量和每个成功号
+平均流量。成功号均值会包含失败尝试产生的流量，表示实际成功账号成本。计量文件
+不保存代理 URL、用户名、密码或请求内容；SOCKS 代理会保持原链路并标记为未计量。
 
 也可在控制台手动写入：
 
@@ -388,6 +439,34 @@ python sso_to_auth_json.py \
 - 账号登录、批量注册和账号补录互斥，避免并发争用浏览器与 auth 输出
 - 库存文件是 owner-only 明文凭据文件；API 和表格只返回 `has_password`、`has_sso`、`cpa_ok`，不回传密码或 SSO 原文
 
+### BFS 检测（JWT claim）
+
+xAI 部分 access_token 的 payload 会带 **`bfs` 字段**（常见值 `2`）。**只要 key 存在即视为标记**，与 grok.com 的 `botFlagSource` / `policy=deny` 不是同一信号。
+
+| 能力 | 说明 |
+|------|------|
+| 注册后自动检测 | SSO→OAuth 换 token 后解码 JWT；命中写入 `accounts/sso_bfs_flagged.txt`，CPA 记录带 `bfs` / `bfs_value` |
+| 面板 | 「BFS 检测」卡片：扫描 `cpa_auth` / `grok2api_auth`，导出 `log/bfs_flagged.jsonl` |
+| CLI | `python scripts/check_bfs.py` 或 `python sso_to_auth_json.py --check-bfs-dir cpa_auth` |
+
+`config.json` 可选：
+
+| 字段 | 默认 | 含义 |
+|------|------|------|
+| `bfs_check` | `true` | 换 token 后检测 |
+| `bfs_skip_cpa` | `false` | 命中 bfs 时跳过 CPA/Grok2API 写入 |
+| `bfs_disable_cpa` | `false` | 命中仍写入，但 `disabled: true` |
+
+无法解码的 token 会显示为 `unknown`，不会伪造为 clean；启用 `bfs_skip_cpa` 时，面板注册路径的 unknown 账号不会写入 CPA/Grok2API，而是进入待重转队列。CLI 则跳过本次写入并在报告中记为失败。
+
+```bash
+# 扫描本地 CPA 目录
+python scripts/check_bfs.py --dir cpa_auth --export log/bfs_flagged.jsonl
+
+# 单 token 诊断（不回显原文）
+python scripts/check_bfs.py --token 'eyJ...'
+```
+
 ## 工程实践备忘（非教程承诺）
 
 以下为社区常见踩坑方向，**环境差异大，仅供参考**：
@@ -395,9 +474,10 @@ python sso_to_auth_json.py \
 1. 邮箱：二级域名临时邮往往比批发一级域 / 大盘 Outlook·Google 更省事  
 2. 出口：质量与冷却窗口影响大；同一出口短时间打太满容易抬失败率  
 3. 风控字段：服务端 deny 后宜尽早结束 OAuth 路径  
-4. 并发建议从 2～3 起跳，过高易空页、Turnstile 卡住、代理打满  
-5. 「资料填写失败」有时是资料页人机未过，不一定是姓名密码写不进  
-6. 链式代理在客户端配，不在注册机 Python 里写死  
+4. JWT `bfs`：与 botFlag 分开统计；入库前可用面板/CLI 批量扫 CPA
+5. 并发建议从 2～3 起跳，过高易空页、Turnstile 卡住、代理打满
+6. 「资料填写失败」有时是资料页人机未过，不一定是姓名密码写不进
+7. 链式代理在客户端配，不在注册机 Python 里写死
 
 ## 目录结构
 
@@ -411,6 +491,7 @@ python sso_to_auth_json.py \
 ├── account_login_worker.py    # 导入账号并发后台任务
 ├── camoufox_adapter.py
 ├── connectivity.py
+├── batch_supervisor.py        # 批处理监督、卡死恢复与原子进度
 ├── run_batch_headless.py      # 无头批量（包根 Path 后 chdir）
 ├── run_until_100.py           # 编排器
 ├── webui/
@@ -418,24 +499,32 @@ python sso_to_auth_json.py \
 │   ├── security_utils.py      # redact / token 校验
 │   ├── blacklist_store.py     # 锁保护的 JSON 黑名单状态
 │   ├── proxy_store.py         # 外部代理池、探活、冷却与脱敏视图
+│   ├── email_provider_store.py # 邮箱 provider 配置、测试与密钥保护
 │   ├── email_domain_store.py  # 邮箱域名池、拒绝阈值与轮换状态
 │   ├── process_utils.py       # 当前项目实例的进程发现 / 停止
 │   ├── recovery_ops.py        # SSO / accounts 异步补录
 │   ├── account_login_store.py # 私密导入账号库存 / 脱敏公开视图
 │   ├── account_login_ops.py   # 导入、启动、停止和删除操作
+│   ├── bfs_ops.py             # JWT bfs 扫描 / 面板接口
 │   └── blacklist_ops.py       # 面板黑名单接口
 ├── email_providers/
-├── tests/                     # 结构 / 脱敏 / chdir 冒烟
-├── scripts/                   # xvfb 辅助脚本
+├── tests/                     # 结构 / 脱敏 / bfs / chdir 冒烟
+├── scripts/
+│   ├── check_bfs.py           # 批量 bfs 扫描
+│   └── …                      # xvfb 等辅助
 ├── config.example.json
 ├── proxies.example.txt
 ├── requirements.txt
+├── AGENTS.md                  # AI 编码代理的仓库工作指南
 ├── DEPLOYMENT.md
 ├── LICENSE · NOTICE
 └── README.md
 ```
 
 ## 自检
+
+参与开发或让 AI 修改仓库前，先阅读 [AGENTS.md](AGENTS.md)。部署细节见
+[DEPLOYMENT.md](DEPLOYMENT.md)，发布验收见 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)。
 
 ```bash
 # 无需 pytest；运行全部发布检查

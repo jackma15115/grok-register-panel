@@ -66,6 +66,15 @@ FIELD_DEFINITIONS = {
         "type": "password",
         "secret": True,
     },
+    "cloudflare_randomize_subdomain": {
+        "label": "随机子域",
+        "type": "select",
+        "default": "true",
+        "options": [
+            {"value": "true", "label": "启用（需泛域收信）"},
+            {"value": "false", "label": "关闭（固定域名）"},
+        ],
+    },
     "defaultDomains": {
         "label": "收信域名",
         "type": "text",
@@ -192,6 +201,7 @@ PROVIDER_FIELDS = {
         "cloudflare_auth_mode",
         "cloudflare_api_key",
         "cloudflare_custom_auth",
+        "cloudflare_randomize_subdomain",
         "defaultDomains",
         "cloudflare_path_domains",
         "cloudflare_path_accounts",

@@ -18,10 +18,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from secure_files import atomic_write_json, ensure_private_dir
+from secure_files import atomic_write_json, best_effort_fchmod, ensure_private_dir
+from batch_traffic import read_metrics as read_batch_traffic
+from batch_traffic import read_summary as read_batch_traffic_summary
 from runtime_platform import (
     batch_launch_command,
     batch_runtime_error,
+    beijing_strftime,
+    now_beijing,
     popen_group_kwargs,
     runtime_python,
 )
@@ -63,6 +67,7 @@ try:
         write_pid_file,
     )
     from webui.recovery_ops import recovery_status, start_recovery, stop_recovery
+    from webui.bfs_ops import bfs_status, check_token_text, run_bfs_scan
     from webui.security_utils import (
         check_token_optional_read,
         expected_token,
@@ -107,6 +112,7 @@ except ImportError:  # running as script from webui/
         write_pid_file,
     )
     from recovery_ops import recovery_status, start_recovery, stop_recovery  # type: ignore
+    from bfs_ops import bfs_status, check_token_text, run_bfs_scan  # type: ignore
     from security_utils import (  # type: ignore
         check_token_optional_read,
         expected_token,
@@ -115,6 +121,8 @@ except ImportError:  # running as script from webui/
         redact_proxy,
     )
 LOG_DIR = ROOT / "log"
+BATCH_TRAFFIC = LOG_DIR / "batch_traffic.json"
+BATCH_TRAFFIC_HISTORY = LOG_DIR / "batch_traffic_history.json"
 CPA_DIR = Path(os.environ.get("CPA_AUTH_DIR", str(ROOT / "cpa_auth")))
 CONFIG_FILE = Path(
     os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
@@ -126,6 +134,49 @@ FONT_ASSETS = {
 }
 MONITOR_TOKEN_ENV = "MONITOR_TOKEN"
 PANEL_INCLUDE_TAIL = os.environ.get("PANEL_INCLUDE_TAIL", "0").strip() in ("1", "true", "yes")
+
+
+def _configured_process_roots(
+    current_root: Path = ROOT,
+    environ=None,
+) -> tuple[Path, ...]:
+    """Return exact project roots allowed for cross-release process discovery."""
+    env = os.environ if environ is None else environ
+    roots = [Path(current_root).resolve()]
+    raw = str(env.get("GROK_COMPAT_PROCESS_ROOTS", "") or "").strip()
+    for item in raw.split(os.pathsep):
+        value = item.strip()
+        if not value:
+            continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_dir() and resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+MANAGED_PROCESS_ROOTS = _configured_process_roots()
+
+
+def _find_managed_processes(script_names) -> list[dict]:
+    found = {}
+    for root in MANAGED_PROCESS_ROOTS:
+        for item in find_managed_processes(root, script_names):
+            found[int(item["pid"])] = item
+    return sorted(found.values(), key=lambda item: int(item["pid"]))
+
+
+def _terminate_managed_processes(script_names) -> list[int]:
+    killed = set()
+    for root in MANAGED_PROCESS_ROOTS:
+        killed.update(terminate_managed_processes(root, script_names))
+    return sorted(killed)
+
 
 BASE_FILE = LOG_DIR / "batch1000.base"
 ORCH_PID = LOG_DIR / "orch100.pid"
@@ -153,6 +204,7 @@ RE_DOMAIN = re.compile(r"\[-\] 域名拒绝")
 RE_SKIP = re.compile(r"\[-\] 卡住跳过")
 RE_BOT0 = re.compile(r"botFlagSource=0")
 RE_BOT1 = re.compile(r"botFlagSource=1")
+RE_BFS = re.compile(r"JWT bfs 标记|bfs=yes|kind=bfs_flagged|has_bfs")
 RE_EMAIL_OK = re.compile(r"\[\+\] 注册成功(?:（[^）]*）)?:\s*(\S+)")
 RE_FAIL_KIND = re.compile(r"\[-\] 失败 \[([^\]]+)\]:\s*(.*)")
 RE_WORKER = re.compile(r"\[W(\d+)\]")
@@ -268,8 +320,8 @@ def process_running():
         "batch_pid": None,
         "batch_etime": None,
     }
-    orch = find_managed_processes(ROOT, ("run_until_100.py",))
-    batch = find_managed_processes(ROOT, ("run_batch_headless.py",))
+    orch = _find_managed_processes(("run_until_100.py",))
+    batch = _find_managed_processes(("run_batch_headless.py",))
 
     def primary(items):
         if not items:
@@ -309,7 +361,7 @@ def parse_log(path, max_tail=400_000):
         text = f.read().decode("utf-8", errors="replace")
 
     lines = text.splitlines()
-    ok = fail = domain = skip = bot0 = bot1 = 0
+    ok = fail = domain = skip = bot0 = bot1 = bfs_hits = 0
     count = workers = None
     ended = None
     recent_ok = []
@@ -358,6 +410,8 @@ def parse_log(path, max_tail=400_000):
             bot0 += 1
         if RE_BOT1.search(line):
             bot1 += 1
+        if RE_BFS.search(line):
+            bfs_hits += 1
 
     last_lines = lines[-40:]
     mail_lines = [
@@ -377,6 +431,7 @@ def parse_log(path, max_tail=400_000):
         fail = gcount(r"\[-\] 失败")
         bot0 = gcount("botFlagSource=0")
         bot1 = gcount("botFlagSource=1")
+        bfs_hits = gcount("JWT bfs 标记") + gcount("bfs_flagged")
 
     return {
         "log": path.name,
@@ -391,12 +446,14 @@ def parse_log(path, max_tail=400_000):
         "skip": skip,
         "bot0": bot0,
         "bot1": bot1,
+        "bfs": bfs_hits,
         "ended": ended,
         "fail_kinds": fail_kinds,
         "worker_ok": worker_ok,
         "worker_fail": worker_fail,
-        "recent_ok": recent_ok[-25:][::-1],
-        "recent_fail": recent_fail[-25:][::-1],
+        # 前端分页每页 10 条；后端多留一些供翻页
+        "recent_ok": recent_ok[-80:][::-1],
+        "recent_fail": recent_fail[-80:][::-1],
         "tail": [redact_log_line(line) for line in last_lines],
         "mail_tail": mail_lines,
     }
@@ -470,6 +527,7 @@ def blacklist_update_errors():
 def success_stats():
     """Aggregate success stats: CPA + jsonl + time-window rates + latest batch."""
     from datetime import datetime, timezone, timedelta
+    from runtime_platform import TZ_BEIJING
 
     cpa = cpa_count()
     configured_base = read_base()
@@ -481,11 +539,17 @@ def success_stats():
     by_day = {}
     results = LOG_DIR / "register_results.jsonl"
 
-    # windows in hours -> counters
+    # windows in hours -> counters（按北京时间窗口）
     windows_h = (1, 3, 12)
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
     win = {
-        h: {"ok": 0, "fail": 0, "risk": 0, "total": 0, "since": (now - timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        h: {
+            "ok": 0,
+            "fail": 0,
+            "risk": 0,
+            "total": 0,
+            "since": (now - timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
         for h in windows_h
     }
 
@@ -499,7 +563,7 @@ def success_stats():
             dt = datetime.fromisoformat(s)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+            return dt.astimezone(TZ_BEIJING)
         except Exception:
             return None
 
@@ -517,7 +581,9 @@ def success_stats():
                     except Exception:
                         continue
                     st = o.get("status")
-                    day = (o.get("ts") or "")[:10]
+                    dt = _parse_ts(o.get("ts") or "")
+                    # 按日统计用北京日期
+                    day = dt.strftime("%Y-%m-%d") if dt else (o.get("ts") or "")[:10]
                     if day:
                         by_day.setdefault(day, {"ok": 0, "risk": 0, "fail": 0})
                     if st == "ok":
@@ -533,7 +599,6 @@ def success_stats():
                         if day:
                             by_day[day]["fail"] += 1
 
-                    dt = _parse_ts(o.get("ts") or "")
                     if not dt:
                         continue
                     age = now - dt
@@ -587,7 +652,7 @@ def success_stats():
         "batch_log": parsed.get("log_name"),
         "by_day": by_day,
         "rates": rates,
-        "refreshed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "refreshed_at": beijing_strftime("%Y-%m-%d %H:%M:%S"),
     }
     try:
         _write_json(STATS_CACHE, data)
@@ -622,9 +687,8 @@ def _parse_etime(s):
 
 def kill_all():
     """Stop only orchestrator and batch processes under this project root."""
-    killed = terminate_managed_processes(
-        ROOT,
-        ("run_until_100.py", "run_batch_headless.py"),
+    killed = _terminate_managed_processes(
+        ("run_until_100.py", "run_batch_headless.py")
     )
     return {"ok": True, "killed": killed}
 
@@ -640,11 +704,22 @@ def _runtime_prerequisite_error() -> str | None:
     return None
 
 
+def _registration_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("GROK_STATIC_ASSET_CACHE", "1")
+    env.setdefault(
+        "GROK_STATIC_CACHE_DIR",
+        str(LOG_DIR / "static-asset-cache"),
+    )
+    return env
+
+
 def _start_orch_unlocked():
     proc = process_running()
     if proc.get("orch_running") or proc.get("batch_running"):
         return {"ok": False, "error": "already running", "process": proc}
-    if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
+    if _find_managed_processes(("sso_to_auth_json.py",)):
         return {"ok": False, "error": "account recovery is running"}
     if find_managed_processes(ROOT, ("account_login_worker.py",)):
         return {"ok": False, "error": "account login task is running"}
@@ -677,10 +752,7 @@ def _start_orch_unlocked():
     ensure_private_dir(LOG_DIR)
     stdout_path = LOG_DIR / "orch100-stdout.log"
     fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-    except OSError:
-        pass
+    best_effort_fchmod(fd, 0o600)
     stdout = os.fdopen(fd, "a", encoding="utf-8")
     stdout.write(
         f"\n--- monitor start {time.strftime('%Y-%m-%dT%H:%M:%SZ')} "
@@ -693,7 +765,7 @@ def _start_orch_unlocked():
             cwd=str(ROOT),
             stdout=stdout,
             stderr=subprocess.STDOUT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=_registration_env(),
             **popen_group_kwargs(),
         )
     finally:
@@ -723,7 +795,7 @@ def _start_batch_only_unlocked():
     proc = process_running()
     if proc.get("batch_running") or proc.get("orch_running"):
         return {"ok": False, "error": "already running", "process": proc}
-    if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
+    if _find_managed_processes(("sso_to_auth_json.py",)):
         return {"ok": False, "error": "account recovery is running"}
     if find_managed_processes(ROOT, ("account_login_worker.py",)):
         return {"ok": False, "error": "account login task is running"}
@@ -740,10 +812,7 @@ def _start_batch_only_unlocked():
     logname = LOG_DIR / f"batch-orch-{time.strftime('%Y%m%d-%H%M%S')}-n{count}.log"
     ensure_private_dir(LOG_DIR)
     fd = os.open(logname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-    except OSError:
-        pass
+    best_effort_fchmod(fd, 0o600)
     fout = os.fdopen(fd, "w", encoding="utf-8")
     try:
         p = subprocess.Popen(
@@ -756,6 +825,7 @@ def _start_batch_only_unlocked():
             cwd=str(ROOT),
             stdout=fout,
             stderr=subprocess.STDOUT,
+            env=_registration_env(),
             **popen_group_kwargs(),
         )
     finally:
@@ -807,9 +877,18 @@ def snapshot():
             eta_min = remain / rate_per_min
             eta = f"{int(eta_min)}m" if eta_min < 120 else f"{eta_min/60:.1f}h"
     workers_show = parsed.get("workers") or control.get("workers")
+    traffic = read_batch_traffic(BATCH_TRAFFIC)
+    if traffic.get("running") and not proc.get("running"):
+        traffic["running"] = False
+    if int(traffic.get("version") or 0) < 2:
+        traffic["successful_accounts"] = max(
+            int(traffic.get("successful_accounts") or 0),
+            int(parsed.get("ok") or 0),
+        )
+    traffic_summary = read_batch_traffic_summary(BATCH_TRAFFIC_HISTORY, traffic)
     return {
         "ts": time.time(),
-        "ts_human": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts_human": beijing_strftime("%Y-%m-%d %H:%M:%S"),
         "base_cpa": base,
         "base_cpa_stale": base_stale,
         "cpa": cpa,
@@ -822,6 +901,8 @@ def snapshot():
         "success_rate": round(100.0 * ok / done, 1) if done else None,
         "rate_per_min": rate_per_min,
         "eta": eta,
+        "traffic": traffic,
+        "traffic_summary": traffic_summary,
         "blacklist": {
             "count": bl.get("count"),
             "asns": bl.get("asns"),
@@ -860,6 +941,10 @@ HTML = r"""<!DOCTYPE html>
   })();
 </script>
 <style>
+  /* Hallmark · macrostructure: Workbench · tone: utilitarian · anchor hue: oxide-red
+   * pre-emit critique: P4 H5 E5 S5 R5 V4 · component: batch traffic KPI
+   * contrast: inherited pass · mobile: verified at 320/375/414/768
+   */
   @font-face {
     font-family: "Geist";
     src: url("/assets/geist.woff2") format("woff2");
@@ -925,10 +1010,12 @@ HTML = r"""<!DOCTYPE html>
     border: 0;
   }
   html {
+    overflow-x: clip;
     background: var(--bg);
     transition: background-color 180ms ease, color 180ms ease;
   }
   body {
+    overflow-x: clip;
     margin: 0;
     min-height: 100dvh;
     background-color: var(--bg);
@@ -1054,6 +1141,22 @@ HTML = r"""<!DOCTYPE html>
     margin-bottom: 14px;
   }
   .section-meta { color: var(--muted); font-size: 12px; text-align: right; }
+  .list-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .list-pager .pager-info { color: var(--muted); font-size: 12px; }
+  .list-pager .pager-btns { display: flex; gap: 6px; align-items: center; }
+  .list-pager button {
+    min-height: 30px;
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+  .list-pager button:disabled { opacity: .4; cursor: not-allowed; }
   .control-grid {
     display: grid;
     grid-template-columns: minmax(220px, 1.6fr) minmax(150px, .9fr) repeat(4, minmax(100px, .55fr)) minmax(258px, auto);
@@ -1936,6 +2039,10 @@ HTML = r"""<!DOCTYPE html>
             <summary>出现 policy=deny 或注册风控</summary>
             <div class="faq-answer">该账号已被注册风控拒绝，不要反复重转同一 SSO。先更换质量更好的出口并给 IP 冷却时间，邮箱优先使用稳定的子域名，并发先保持 2-3。</div>
           </details>
+          <details class="faq-item" data-faq-item data-search="bfs jwt claim access_token 标记 flagged 风控 检测 scan">
+            <summary>什么是 bfs，和 botFlagSource 有何不同</summary>
+            <div class="faq-answer"><code>bfs</code> 是 xAI access_token / SSO JWT 里的风险 claim：payload 里<strong>出现该字段</strong>即视为标记（常见值 2）。它与 grok.com 页面的 <code>botFlagSource</code> / <code>policy=deny</code> 独立。注册换 token 后会自动检测；也可在控制台“BFS 检测”扫描 CPA 目录，导出 <code>log/bfs_flagged.jsonl</code>。配置 <code>bfs_skip_cpa</code> 可跳过入库，<code>bfs_disable_cpa</code> 可写 disabled。</div>
+          </details>
           <details class="faq-item" data-faq-item data-search="卡住 浏览器 启动失败 turnstile 资料页 空页 并发 camoufox">
             <summary>注册卡在验证码、资料页或浏览器启动</summary>
             <div class="faq-answer">先从失败分类和日志尾部确认具体阶段。连续浏览器启动失败时降低并发，并检查是否执行过 <code>camoufox fetch</code>；资料页失败也可能是 Turnstile 未通过。</div>
@@ -2236,6 +2343,29 @@ HTML = r"""<!DOCTYPE html>
     <div class="tail mono account-login-log" id="account-login-tail">暂无登录日志</div>
   </section>
 
+  <section class="card panel" aria-labelledby="bfs-title">
+    <div class="section-head">
+      <h2 id="bfs-title">BFS 检测</h2>
+      <span class="section-meta mono" id="bfs-status">JWT claim</span>
+    </div>
+    <p style="margin:0 0 10px;color:var(--muted);font-size:13px;line-height:1.5">
+      解码 CPA / Grok2API auth 中的 access_token，检查是否含 <code>bfs</code> claim（与 botFlagSource 独立）。
+      注册换 token 后会自动检测并写入 <code>accounts/sso_bfs_flagged.txt</code>。
+    </p>
+    <div class="chips" id="bfs-kpis"></div>
+    <div class="button-group" style="margin-top:10px">
+      <button id="bfs-scan" onclick="runBfsScan()">扫描 auth 目录</button>
+      <button onclick="refreshBfs()">刷新状态</button>
+    </div>
+    <div class="msg" id="bfs-msg" role="status" aria-live="polite"></div>
+    <div class="table-scroll" style="margin-top:10px;max-height:220px">
+      <table>
+        <thead><tr><th>邮箱</th><th>bfs</th><th>来源</th><th>文件</th></tr></thead>
+        <tbody id="bfs-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <div class="three panel-gap">
     <div class="card">
       <div class="section-head">
@@ -2279,12 +2409,32 @@ HTML = r"""<!DOCTYPE html>
   </div>
   <div class="two panel-gap">
     <div class="card">
-      <div class="section-head"><h2>最近成功</h2></div>
+      <div class="section-head">
+        <h2>最近成功</h2>
+        <span class="section-meta" id="ok-page-meta"></span>
+      </div>
       <div class="table-scroll"><table><thead><tr><th>时间</th><th>W</th><th>邮箱</th></tr></thead><tbody id="ok-body"></tbody></table></div>
+      <div class="list-pager" id="ok-pager">
+        <span class="pager-info" id="ok-pager-info"></span>
+        <div class="pager-btns">
+          <button type="button" id="ok-prev" aria-label="上一页">上一页</button>
+          <button type="button" id="ok-next" aria-label="下一页">下一页</button>
+        </div>
+      </div>
     </div>
     <div class="card">
-      <div class="section-head"><h2>最近失败</h2></div>
+      <div class="section-head">
+        <h2>最近失败</h2>
+        <span class="section-meta" id="fail-page-meta"></span>
+      </div>
       <div class="table-scroll"><table><thead><tr><th>时间</th><th>W</th><th>类型</th><th>摘要</th></tr></thead><tbody id="fail-body"></tbody></table></div>
+      <div class="list-pager" id="fail-pager">
+        <span class="pager-info" id="fail-pager-info"></span>
+        <div class="pager-btns">
+          <button type="button" id="fail-prev" aria-label="上一页">上一页</button>
+          <button type="button" id="fail-next" aria-label="下一页">下一页</button>
+        </div>
+      </div>
     </div>
   </div>
   <section class="card panel">
@@ -2305,6 +2455,13 @@ const clearedEmailSecrets = new Set();
 const THEME_KEY = "GROK_REGISTER_THEME";
 const APP_VIEW_KEY = "GROK_REGISTER_APP_VIEW";
 const HELP_TAB_KEY = "GROK_REGISTER_HELP_TAB";
+const LIST_PAGE_SIZE = 10;
+let okPage = 1;
+let failPage = 1;
+let okRowsCache = [];
+let failRowsCache = [];
+// 完整成功统计（jsonl / by_day）；2s 轮询只更新本批数字，不能冲掉
+let lastFullStats = null;
 function syncThemeButtons() {
   const theme = document.documentElement.dataset.theme || "light";
   document.querySelectorAll("[data-theme-choice]").forEach(button => {
@@ -2462,6 +2619,19 @@ document.addEventListener("keydown", event => {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return Math.round(bytes) + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  let scaled = bytes / 1024;
+  let unit = units[0];
+  for (let i = 1; i < units.length && scaled >= 1024; i += 1) {
+    scaled /= 1024;
+    unit = units[i];
+  }
+  const digits = scaled >= 100 ? 0 : (scaled >= 10 ? 1 : 2);
+  return scaled.toFixed(digits) + " " + unit;
+}
 function setMsg(id, text, cls) {
   const el = document.getElementById(id);
   el.textContent = text || "";
@@ -2507,7 +2677,15 @@ function proxyTime(value) {
   if (!value) return "--";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  // 统一北京时间展示（服务器可能是 UTC）
+  return date.toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 function cooldownText(item) {
   const seconds = Number(item.cooldown_remaining_seconds || 0);
@@ -2704,7 +2882,14 @@ function renderEmailProviderConfig(data) {
     : (providers[0] && providers[0].id || "");
   const updated = emailProviderData.mtime ? new Date(emailProviderData.mtime * 1000) : null;
   document.getElementById("mail-provider-updated").textContent = updated && !Number.isNaN(updated.getTime())
-    ? ("config.json " + updated.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }))
+    ? ("config.json " + updated.toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }))
     : "config.json 尚未创建";
   renderEmailProviderFields(provider);
 }
@@ -2983,7 +3168,9 @@ async function refreshBlacklist() {
 async function refreshStats(authHelp = true) {
   try {
     const j = await api("/api/stats?_=" + Date.now(), { authHelp });
-    renderStats(j);
+    // 完整统计入库；后续 2s 快照只合并本批字段
+    lastFullStats = Object.assign({}, lastFullStats || {}, j || {});
+    renderStats(lastFullStats);
     setMsg("stats-msg", "统计已刷新 " + (j.refreshed_at || ""), "ok");
   } catch (e) { setMsg("stats-msg", String(e.message || e), "err"); }
 }
@@ -3027,7 +3214,6 @@ async function stopRecovery() {
     await refreshRecovery();
   } catch (e) { setMsg("recovery-msg", String(e.message || e), "err"); }
 }
-
 function accountLoginStatusLabel(status) {
   return ({
     pending: "待处理", queued: "排队中", running: "登录中", success: "CPA 成功",
@@ -3194,6 +3380,60 @@ async function downloadAccountExport(path) {
     setMsg("recovery-msg", String(error.message || error), "err");
   }
 }
+
+function renderBfs(data) {
+  data = data || {};
+  const last = data.last_report || {};
+  const rj = data.results_jsonl || {};
+  const el = document.getElementById("bfs-kpis");
+  if (!el) return;
+  el.innerHTML = [
+    ["上次扫描", last.total ?? "--", ""],
+    ["BFS", last.bfs_count ?? "--", (last.bfs_count || 0) > 0 ? "warn" : "ok"],
+    ["Clean", last.clean_count ?? "--", "ok"],
+    ["比率", last.bfs_rate != null ? (last.bfs_rate + "%") : "--", (last.bfs_rate || 0) > 0 ? "warn" : ""],
+    ["队列文件", data.flagged_file_count ?? 0, (data.flagged_file_count || 0) > 0 ? "warn" : ""],
+    ["jsonl bfs", rj.bfs ?? 0, (rj.bfs || 0) > 0 ? "warn" : ""],
+  ].map(([label, value, cls]) => `<div class="chip"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
+  const st = document.getElementById("bfs-status");
+  if (st) st.textContent = last.scanned_at ? ("扫描 " + last.scanned_at) : "尚未扫描";
+  const body = document.getElementById("bfs-body");
+  if (body && Array.isArray(data.items)) {
+    const rows = data.items.filter(it => it.has_bfs).slice(0, 50);
+    body.innerHTML = rows.length ? rows.map(it =>
+      `<tr><td class="mono">${esc(it.email || "-")}</td><td class="warn">${esc(it.bfs != null ? it.bfs : "yes")}</td><td class="mono">${esc(it.source || "")}</td><td class="mono">${esc(it.file || "")}</td></tr>`
+    ).join("") : '<tr><td colspan="4" style="color:var(--muted)">无 bfs 记录（先点扫描）</td></tr>';
+  }
+}
+async function refreshBfs(authHelp = false) {
+  try {
+    const data = await api("/api/bfs?_=" + Date.now(), { authHelp });
+    renderBfs(data);
+  } catch (e) {
+    const st = document.getElementById("bfs-status");
+    if (st) st.textContent = String(e.message || e).includes("令牌") ? "等待令牌" : "检查失败";
+  }
+}
+async function runBfsScan() {
+  setMsg("bfs-msg", "正在扫描 CPA / Grok2API auth …", "");
+  const btn = document.getElementById("bfs-scan");
+  if (btn) btn.disabled = true;
+  try {
+    const data = await api("/api/bfs/scan", { method: "POST", body: JSON.stringify({}) });
+    renderBfs(Object.assign({}, data, { last_report: data, items: data.items || [] }));
+    setMsg("bfs-msg",
+      "完成 total=" + (data.total ?? 0) +
+      " bfs=" + (data.bfs_count ?? 0) +
+      " clean=" + (data.clean_count ?? 0) +
+      " rate=" + (data.bfs_rate ?? 0) + "%" +
+      (data.export_path ? (" → " + data.export_path) : ""),
+      "ok");
+  } catch (e) {
+    setMsg("bfs-msg", String(e.message || e), "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 function renderBlacklist(bl, upd) {
   bl = bl || {};
   upd = upd || {};
@@ -3248,21 +3488,48 @@ function renderRates(rates) {
   if (el) el.innerHTML = cards.join("");
 }
 
-function renderStats(s) {
+function renderStats(s, opts) {
+  opts = opts || {};
   s = s || {};
+  // 快照轻量更新：只覆盖本批/CPA，保留 jsonl / by_day / rates
+  if (opts.liveMerge && lastFullStats) {
+    s = Object.assign({}, lastFullStats, {
+      cpa: s.cpa != null ? s.cpa : lastFullStats.cpa,
+      cpa_delta: s.cpa_delta != null ? s.cpa_delta : lastFullStats.cpa_delta,
+      base_cpa: s.base_cpa != null ? s.base_cpa : lastFullStats.base_cpa,
+      batch_ok: s.batch_ok != null ? s.batch_ok : lastFullStats.batch_ok,
+      batch_fail: s.batch_fail != null ? s.batch_fail : lastFullStats.batch_fail,
+      // rates 以快照里的为准（snapshot 已算），否则沿用缓存
+      rates: (s.rates && Object.keys(s.rates).length) ? s.rates : lastFullStats.rates,
+    });
+  } else if (!opts.liveMerge && s && (typeof s.jsonl_ok === "number" || (s.by_day && Object.keys(s.by_day).length))) {
+    lastFullStats = Object.assign({}, lastFullStats || {}, s);
+  }
   if (s.rates) renderRates(s.rates);
+  const jsonlOk = (typeof s.jsonl_ok === "number") ? s.jsonl_ok : (lastFullStats && lastFullStats.jsonl_ok);
+  const jsonlRisk = (typeof s.jsonl_risk === "number") ? s.jsonl_risk : (lastFullStats && lastFullStats.jsonl_risk);
   document.getElementById("stats-chips").innerHTML = [
     ["CPA", s.cpa ?? "--", "accent"],
     ["CPA 变化", s.cpa_delta ?? "--", "ok"],
     ["本批成功", s.batch_ok ?? 0, "ok"],
     ["本批失败", s.batch_fail ?? 0, "fail"],
-    ["jsonl ok", s.jsonl_ok ?? 0, "ok"],
-    ["jsonl risk", s.jsonl_risk ?? 0, "warn"],
+    ["jsonl ok", jsonlOk != null ? jsonlOk : "--", "ok"],
+    ["jsonl risk", jsonlRisk != null ? jsonlRisk : "--", "warn"],
   ].map(([l,v,c]) => `<div class="chip"><span>${esc(l)}</span><b class="${c}">${esc(v)}</b></div>`).join("");
-  const days = Object.entries(s.by_day || {}).sort((a,b) => b[0].localeCompare(a[0])).slice(0, 10);
+  const byDay = (s.by_day && Object.keys(s.by_day).length)
+    ? s.by_day
+    : ((lastFullStats && lastFullStats.by_day) || {});
+  const days = Object.entries(byDay).sort((a,b) => b[0].localeCompare(a[0])).slice(0, 10);
   document.getElementById("stats-day").innerHTML = days.length ? days.map(([d, v]) =>
     `<tr><td class="mono">${esc(d)}</td><td class="ok">${v.ok||0}</td><td class="warn">${v.risk||0}</td><td class="fail">${v.fail||0}</td></tr>`
   ).join("") : '<tr><td colspan="4" style="color:var(--muted)">无 jsonl 数据</td></tr>';
+  // 保留「统计已刷新」文案，不被 2s 轮询清掉
+  if (!opts.liveMerge && s.refreshed_at) {
+    const el = document.getElementById("stats-msg");
+    if (el && !String(el.textContent || "").includes("失败")) {
+      /* refreshed via setMsg in refreshStats */
+    }
+  }
 }
 function render(d) {
   document.getElementById("clock").textContent = d.ts_human || "--";
@@ -3286,13 +3553,35 @@ function render(d) {
   document.getElementById("btn-stop").disabled = !on;
   fillControl(d);
 
+  const traffic = d.traffic || {};
+  const hasTrafficBatch = !!traffic.batch_id;
+  const trafficTotal = Number(traffic.bytes_total) || 0;
+  const trafficState = traffic.running ? "运行中" : "上一批";
+  const trafficSub = hasTrafficBatch
+    ? trafficState + " / 上行 " + formatBytes(traffic.bytes_up) + " / 下行 " + formatBytes(traffic.bytes_down)
+      + ((Number(traffic.unmetered_proxies) || 0) > 0 ? " / 未计量 " + traffic.unmetered_proxies : "")
+    : "等待批次计量";
+  const trafficSummary = d.traffic_summary || {};
+  const trafficBatchCount = Number(trafficSummary.batch_count) || 0;
+  const trafficSuccessCount = Number(trafficSummary.successful_accounts) || 0;
+  const trafficAverageSub = trafficBatchCount
+    ? trafficBatchCount + " 批样本 / 累计 " + formatBytes(trafficSummary.total_bytes)
+      + (trafficSummary.includes_current ? " / 含本批" : "")
+    : "等待批次样本";
+  const trafficSuccessSub = trafficSuccessCount
+    ? "累计成功 " + trafficSuccessCount + " / 含失败流量"
+    : "等待成功账号样本";
   const kpis = [
     ["本批成功", d.ok ?? 0, "ok", "目标 " + (d.target ?? "--")],
     ["本批失败", d.fail ?? 0, "fail", d.success_rate != null ? "成功率 " + d.success_rate + "%" : "暂无数据"],
     ["CPA 总量", d.cpa ?? "--", "accent", "较基线 " + (d.cpa_delta != null ? ((Number(d.cpa_delta) >= 0 ? "+" : "") + d.cpa_delta) : "--")],
     ["正常 / 风控", (d.bot0 ?? 0) + " / " + (d.bot1 ?? 0), (d.bot1 ?? 0) > 0 ? "warn" : "ok", "注册结果采样"],
+    ["BFS 标记", d.bfs ?? 0, (d.bfs ?? 0) > 0 ? "warn" : "ok", "JWT claim 命中"],
     ["黑名单 ASN", (d.blacklist && d.blacklist.count) ?? "--", "accent", "更新错误 " + ((d.blacklist_update && d.blacklist_update.error_count) ?? 0)],
+    ["本批代理流量", hasTrafficBatch ? formatBytes(trafficTotal) : "--", "accent", trafficSub],
     ["预计完成", d.ended ? "已完成" : (d.eta || "--"), "", "并发 " + (d.workers ?? "--") + (d.rate_per_min != null ? " / " + d.rate_per_min + " 每分钟" : "")],
+    ["每批平均流量", trafficSummary.bytes_per_batch != null ? formatBytes(trafficSummary.bytes_per_batch) : "--", "accent", trafficAverageSub],
+    ["每个成功号平均流量", trafficSummary.bytes_per_success != null ? formatBytes(trafficSummary.bytes_per_success) : "--", "ok", trafficSuccessSub],
   ];
   document.getElementById("kpis").innerHTML = kpis.map(([label, val, cls, sub]) =>
     `<div class="metric"><div class="label">${esc(label)}</div><div class="value ${cls}">${esc(val)}</div><div class="sub">${esc(sub)}</div></div>`
@@ -3309,13 +3598,15 @@ function render(d) {
     + (d.ended ? " / 结束：成功 " + d.ended.success + "，失败 " + d.ended.fail : "");
 
   renderBlacklist(d.blacklist, d.blacklist_update);
-  // light stats from snapshot
+  // 2s 快照：只更新本批/CPA，绝不清空 jsonl / 按日表
   renderStats({
-    cpa: d.cpa, cpa_delta: d.cpa_delta, base_cpa: d.base_cpa,
-    batch_ok: d.ok, batch_fail: d.fail,
-    jsonl_ok: "--", jsonl_risk: "--",
-    by_day: {}, refreshed_at: d.ts_human,
-  });
+    cpa: d.cpa,
+    cpa_delta: d.cpa_delta,
+    base_cpa: d.base_cpa,
+    batch_ok: d.ok,
+    batch_fail: d.fail,
+    rates: d.rates || {},
+  }, { liveMerge: true });
 
   const wset = new Set([...(Object.keys(d.worker_ok || {})), ...(Object.keys(d.worker_fail || {}))]);
   const ws = [...wset].sort((a, b) => parseInt(a.slice(1)) - parseInt(b.slice(1)));
@@ -3326,12 +3617,11 @@ function render(d) {
   document.getElementById("fails").innerHTML = fk.length ? fk.map(([k, v]) =>
     `<div class="chip"><span>${esc(k)}</span><b class="fail">${v}</b></div>`
   ).join("") : '<span style="color:var(--muted)">暂无失败</span>';
-  document.getElementById("ok-body").innerHTML = (d.recent_ok || []).map(r =>
-    `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td class="mono">${esc(r.email)}</td></tr>`
-  ).join("") || '<tr><td colspan="3" style="color:var(--muted)">暂无记录</td></tr>';
-  document.getElementById("fail-body").innerHTML = (d.recent_fail || []).map(r =>
-    `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td>${esc(r.kind)}</td><td class="mono">${esc(r.msg)}</td></tr>`
-  ).join("") || '<tr><td colspan="4" style="color:var(--muted)">暂无记录</td></tr>';
+  okRowsCache = Array.isArray(d.recent_ok) ? d.recent_ok.slice() : [];
+  failRowsCache = Array.isArray(d.recent_fail) ? d.recent_fail.slice() : [];
+  // 新数据到来时，若当前页越界则收回最后一页；用户正在翻页时尽量保留页码
+  renderOkPage();
+  renderFailPage();
   document.getElementById("tail").textContent = (d.tail || []).join("\n");
   const mailTail = document.getElementById("mail-tail");
   if (mailTail) {
@@ -3342,17 +3632,93 @@ function render(d) {
     + (d.log_size ? (d.log_size / 1024).toFixed(0) + " KB" : "0 KB")
     + " / 黑名单 " + ((d.blacklist && d.blacklist.count) || 0) + " ASN";
 }
+
+function listPageCount(total) {
+  return Math.max(1, Math.ceil(Math.max(0, total) / LIST_PAGE_SIZE));
+}
+
+function clampPage(page, total) {
+  const pages = listPageCount(total);
+  let p = Math.max(1, parseInt(page, 10) || 1);
+  if (p > pages) p = pages;
+  return p;
+}
+
+function renderOkPage() {
+  const rows = okRowsCache || [];
+  okPage = clampPage(okPage, rows.length);
+  const pages = listPageCount(rows.length);
+  const start = (okPage - 1) * LIST_PAGE_SIZE;
+  const slice = rows.slice(start, start + LIST_PAGE_SIZE);
+  document.getElementById("ok-body").innerHTML = slice.length
+    ? slice.map(r =>
+      `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td class="mono">${esc(r.email)}</td></tr>`
+    ).join("")
+    : '<tr><td colspan="3" style="color:var(--muted)">暂无记录</td></tr>';
+  const meta = rows.length
+    ? `共 ${rows.length} 条 · 第 ${okPage}/${pages} 页`
+    : "共 0 条";
+  document.getElementById("ok-page-meta").textContent = meta;
+  document.getElementById("ok-pager-info").textContent = rows.length
+    ? `每页 ${LIST_PAGE_SIZE} 条`
+    : "";
+  document.getElementById("ok-prev").disabled = okPage <= 1 || !rows.length;
+  document.getElementById("ok-next").disabled = okPage >= pages || !rows.length;
+}
+
+function renderFailPage() {
+  const rows = failRowsCache || [];
+  failPage = clampPage(failPage, rows.length);
+  const pages = listPageCount(rows.length);
+  const start = (failPage - 1) * LIST_PAGE_SIZE;
+  const slice = rows.slice(start, start + LIST_PAGE_SIZE);
+  document.getElementById("fail-body").innerHTML = slice.length
+    ? slice.map(r =>
+      `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td>${esc(r.kind)}</td><td class="mono">${esc(r.msg)}</td></tr>`
+    ).join("")
+    : '<tr><td colspan="4" style="color:var(--muted)">暂无记录</td></tr>';
+  const meta = rows.length
+    ? `共 ${rows.length} 条 · 第 ${failPage}/${pages} 页`
+    : "共 0 条";
+  document.getElementById("fail-page-meta").textContent = meta;
+  document.getElementById("fail-pager-info").textContent = rows.length
+    ? `每页 ${LIST_PAGE_SIZE} 条`
+    : "";
+  document.getElementById("fail-prev").disabled = failPage <= 1 || !rows.length;
+  document.getElementById("fail-next").disabled = failPage >= pages || !rows.length;
+}
+
+document.getElementById("ok-prev").addEventListener("click", () => {
+  okPage = Math.max(1, okPage - 1);
+  renderOkPage();
+});
+document.getElementById("ok-next").addEventListener("click", () => {
+  okPage += 1;
+  renderOkPage();
+});
+document.getElementById("fail-prev").addEventListener("click", () => {
+  failPage = Math.max(1, failPage - 1);
+  renderFailPage();
+});
+document.getElementById("fail-next").addEventListener("click", () => {
+  failPage += 1;
+  renderFailPage();
+});
+
 syncThemeButtons();
 initHelp();
 loadTokenField();
 refresh();
 setInterval(refresh, 2000);
-// full stats once on load
+// 完整成功统计：启动拉一次，之后每 30s 刷新（避免 2s 轮询冲掉）
 refreshStats(false);
+setInterval(() => refreshStats(false), 30000);
 refreshRecovery();
 refreshAccountLogin(false);
 setInterval(refreshRecovery, 5000);
 setInterval(() => refreshAccountLogin(false), 5000);
+refreshBfs();
+setInterval(refreshBfs, 15000);
 setInterval(() => {
   if (document.body.classList.contains("proxy-view-open")) refreshProxies(false);
   if (document.body.classList.contains("domain-view-open")) refreshEmailDomains(false);
@@ -3498,7 +3864,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
             return
-        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains"):
+        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains", "/api/bfs"):
             if not self._require_read():
                 return
         if u.path == "/api/status":
@@ -3529,6 +3895,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, recovery_status())
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
+            return
+        if u.path == "/api/bfs":
+            try:
+                self._json(200, bfs_status())
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
             return
         if u.path == "/api/proxies":
             try:
@@ -3639,6 +4011,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
             except Exception as exc:
                 self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/bfs/scan":
+            try:
+                limit = int((body or {}).get("limit") or 0)
+                include_clean = bool((body or {}).get("include_clean"))
+                result = run_bfs_scan(limit=limit, include_clean=include_clean)
+                self._json(200, result)
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/bfs/check":
+            try:
+                token = str((body or {}).get("token") or "").strip()
+                if not token:
+                    self._json(400, {"ok": False, "error": "token required"})
+                    return
+                self._json(200, check_token_text(token))
+            except Exception as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
             return
         if u.path == "/api/proxies/import":
             try:

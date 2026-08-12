@@ -9,9 +9,17 @@ tests=(
   tests/test_security_utils.py
   tests/test_extract_code.py
   tests/test_moemail.py
+  tests/test_cloudflare_provider.py
   tests/test_runtime_security.py
   tests/test_runtime_platform.py
+  tests/test_windows_runtime.py
   tests/test_sso_recovery.py
+  tests/test_bfs_detect.py
+  tests/test_bfs_ops.py
+  tests/test_bfs_worker_integration.py
+  tests/test_static_asset_cache.py
+  tests/test_batch_traffic.py
+  tests/test_retry_policy.py
   tests/test_monitor_http.py
   tests/test_proxy_store.py
   tests/test_proxy_worker_integration.py
@@ -30,6 +38,7 @@ tests=(
   tests/test_account_login_worker.py
   tests/test_account_login_ops.py
   tests/test_docker_assets.py
+  tests/test_orchestrator_policy.py
 )
 
 for test_file in "${tests[@]}"; do
@@ -50,7 +59,14 @@ done
   run_until_100.py \
   sso_to_auth_json.py \
   account_login_flow.py \
-  account_login_worker.py
+  account_login_worker.py \
+  scripts/check_bfs.py \
+  webui/bfs_ops.py \
+  static_asset_cache.py \
+  batch_traffic.py \
+  retry_policy.py \
+  run_batch_headless_static_cache.py \
+  run_until_100_static_cache.py
 
 bash -n scripts/*.sh
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
