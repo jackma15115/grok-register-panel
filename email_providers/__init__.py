@@ -7,4 +7,5 @@
 - cloudmail: maillab/cloud-mail
 - moemail: MoeMail OpenAPI
 - ti-temp-mail: TI Temp Mail
+- outlook_rt: 本地 Outlook MSA refresh_token 库存（jsonl）
 """

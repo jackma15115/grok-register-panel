@@ -27,9 +27,11 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 出口预检 | 启动前解析出口 IP / ASN，命中黑名单直接换口 |
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
 | **BFS 检测** | 解码 access_token / SSO JWT，检查是否含 `bfs` claim（与 botFlag 独立）；注册后自动标记，面板可批量扫描 CPA |
+| **SSO 风控面板** | 用现有 SSO 读 grok.com 的 `botFlagSource` / `policy=deny`，不换 token；可粘贴或扫描库存，面板只导出不含凭据的脱敏状态名单 |
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
 | **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率、本批代理流量、账号补录和 BFS 扫描；操作 API 需 `MONITOR_TOKEN` |
 | 导入账号登录 | 导入 `email + password`，浏览器登录 xAI 后提取 SSO，并可继续写入 CPA / Grok2API |
+| **SSO 风控面板** | 用现有 SSO 读取 grok.com 的 `botFlagSource` / `policy=deny`，不换 token；可粘贴或扫描库存，面板只导出不含凭据的脱敏状态名单 |
 | 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
 | 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
@@ -180,7 +182,10 @@ sudo apt-get install -y libtk8.6 xvfb xauth
 
 | 字段 | 说明 |
 |------|------|
-| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` |
+| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` / `outlook_rt` |
+| `outlook_rt_inventory` | Outlook MSA 库存路径（jsonl：`email`+`refresh_token`；或 `email----rt`） |
+| `outlook_rt_used_path` | 已用邮箱记录（可选；默认 `库存路径.used`） |
+| `outlook_rt_client_id` | 可选 Client ID；默认 Microsoft Authentication Broker 公共客户端 |
 | `defaultDomains` | 临时邮域名（如二级 CF 域） |
 | `cloudflare_*` / `duckmail_*` 等 | 对应邮箱 API |
 | `cloudflare_randomize_subdomain` | 默认 `true`；为管理域名生成随机子域，要求泛域收信；不支持时设为 `false` |
@@ -378,9 +383,11 @@ python grok_register_ttk.py
 - 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`、`ti-temp-mail`
 - TI Temp Mail 支持可选创建 Token、`maindomain` / `subdomain` 模式和多域名随机选择；创建 Token 与邮箱访问 Token 分开使用
 - 邮箱服务页显示脱敏后的 TI Temp Mail 收件日志；该区域不依赖 `PANEL_INCLUDE_TAIL`，也不会展示邮箱访问 Token
+- 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`、`ti-temp-mail`、`outlook_rt`
+- `outlook_rt` 从本地 jsonl 库存取号（非购买），用 MSA `refresh_token` 刷 Graph 收 xAI 验证码
 - 切换服务商时只显示该服务实际支持的字段；保存后新的注册任务读取 `config.json`
 - 已保存的 API Key、JWT 和密码不会通过接口或页面回显；密钥输入留空会保留原值，必须点“清除”并保存才会删除
-- “测试当前提供商”使用表单中的未保存内容做非破坏性连通性检查，不会改写 `config.json`
+- “测试当前提供商”使用表单中的未保存内容做连通性检查，不会改写 `config.json`；`outlook_rt` 刷新成功时会原子保存上游轮换后的 RT，避免库存保留已失效凭据，但不会标记邮箱已用
 - `config.json` 以原子方式更新并保持 `0600`，现有无关配置项不会被覆盖
 
 域名轮换位于邮箱服务页的高级设置中：
@@ -439,6 +446,22 @@ python sso_to_auth_json.py \
 - 开启“提取 CPA / Grok2API”后调用现有 SSO 转换配置；转换失败时保留 SSO，并显示为“SSO 已提取”供后续重试
 - 账号登录、批量注册和账号补录互斥，避免并发争用浏览器与 auth 输出
 - 库存文件是 owner-only 明文凭据文件；API 和表格只返回 `has_password`、`has_sso`、`cpa_ok`，不回传密码或 SSO 原文
+### SSO 风控检测（botFlag / policy）
+
+用现有 SSO 访问 grok.com，读取 `botFlagSource` / `policy=deny`，**不换 token、不入库**。判定与注册门禁一致：`botFlagSource` 为 1/2，或任意 `policy=deny`。
+
+| 能力 | 说明 |
+|------|------|
+| 面板 | 顶部「SSO 风控」：粘贴列表，或扫描待处理 / 全部账号 / 已隔离名单 |
+| 导出 | 面板下载的标记/干净名单均为脱敏 JSONL，不含 SSO；本机受保护的 `log/sso_clean.txt` 保留原始行，仅供操作者在主机上继续传给 `--sso`，不会通过 API 返回 |
+| CLI | `python scripts/check_sso_state.py --sso list.txt --from-config config.json` |
+
+```bash
+python sso_to_auth_json.py --check-sso-state sso_list.txt --from-config config.json \
+  --sso-state-export log/sso_flagged.jsonl \
+  --sso-state-clean-export log/sso_clean.txt \
+  --report-json log/sso_state_report.json
+```
 
 ### BFS 检测（JWT claim）
 

@@ -260,6 +260,26 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
             if not _tcp_open(host, port):
                 return "邮箱API", False, f"TI Temp Mail 服务不可达: {host}:{port}"
             return "邮箱API", True, f"TI Temp Mail 可达 {host}:{port}"
+        if provider == "outlook_rt":
+            from email_providers import outlook_rt as outlook_rt_provider
+
+            inv = str(config.get("outlook_rt_inventory") or "").strip()
+            if not inv:
+                return "邮箱API", False, "未配置 outlook_rt_inventory"
+            used = str(config.get("outlook_rt_used_path") or "").strip()
+            client_id = str(config.get("outlook_rt_client_id") or "").strip()
+            detail = outlook_rt_provider.probe_inventory(
+                http_post,
+                inv,
+                used_path=used,
+                default_client_id=client_id,
+            )
+            ok = "refresh OK" in detail or "available=" in detail
+            if "available=0" in detail and "refresh OK" not in detail:
+                ok = False
+            if "refresh 失败" in detail:
+                ok = False
+            return "邮箱API", ok, detail[:300]
 
         return "邮箱API", True, f"提供商 {provider} 跳过深度探测"
     except Exception as exc:

@@ -29,6 +29,7 @@ PROVIDER_LABELS = {
     "cloudmail": "CloudMail",
     "moemail": "MoeMail",
     "ti-temp-mail": "TI Temp Mail",
+    "outlook_rt": "Outlook RT 库存",
 }
 SUPPORTED_PROVIDERS = tuple(PROVIDER_LABELS)
 
@@ -193,6 +194,22 @@ FIELD_DEFINITIONS = {
             {"value": "subdomain", "label": "子域名（泛域名）"},
         ],
     },
+    "outlook_rt_inventory": {
+        "label": "库存文件路径",
+        "type": "text",
+        "placeholder": "/path/to/outlook_latest_50_with_rt.jsonl",
+    },
+    "outlook_rt_used_path": {
+        "label": "已用记录路径（可选）",
+        "type": "text",
+        "placeholder": "默认 inventory.used",
+    },
+    "outlook_rt_client_id": {
+        "label": "Client ID（可选）",
+        "type": "text",
+        "default": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+        "placeholder": "默认 Microsoft Authentication Broker",
+    },
 }
 
 PROVIDER_FIELDS = {
@@ -228,6 +245,11 @@ PROVIDER_FIELDS = {
         "ti_temp_mail_api_key",
         "ti_temp_mail_domain",
         "ti_temp_mail_mode",
+    ),
+    "outlook_rt": (
+        "outlook_rt_inventory",
+        "outlook_rt_used_path",
+        "outlook_rt_client_id",
     ),
 }
 
@@ -359,6 +381,16 @@ def _normalize_value(name: str, value: object):
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", text):
             raise EmailProviderConfigError("项目代码格式无效")
         return text
+    if name == "outlook_rt_client_id":
+        text = _string(value) or str(definition.get("default") or "")
+        if text and not re.fullmatch(r"[A-Za-z0-9._-]{8,80}", text):
+            raise EmailProviderConfigError("Outlook Client ID 格式无效")
+        return text
+    if name in {"outlook_rt_inventory", "outlook_rt_used_path"}:
+        text = _string(value)
+        if text and any(ch in text for ch in "\n\r\0"):
+            raise EmailProviderConfigError("库存路径无效")
+        return text
     return _string(value, strip=name != "cloudmail_password")
 
 
@@ -394,6 +426,9 @@ def _is_configured(provider: str, values: dict) -> bool:
         return bool(values.get("moemail_api_base") and values.get("moemail_api_key"))
     if provider == "ti-temp-mail":
         return bool(values.get("ti_temp_mail_base_url"))
+    if provider == "outlook_rt":
+        inventory = str(values.get("outlook_rt_inventory") or "").strip()
+        return bool(inventory and Path(inventory).expanduser().is_file())
     return False
 
 

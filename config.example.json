@@ -45,5 +45,8 @@
   "ti_temp_mail_base_url": "https://keldie.cyou",
   "ti_temp_mail_api_key": "",
   "ti_temp_mail_domain": "",
-  "ti_temp_mail_mode": "maindomain"
+  "ti_temp_mail_mode": "maindomain",
+  "outlook_rt_inventory": "",
+  "outlook_rt_used_path": "",
+  "outlook_rt_client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 }

@@ -55,7 +55,13 @@ def test_provider_schema_and_defaults():
             "cloudmail",
             "moemail",
             "ti-temp-mail",
+            "outlook_rt",
         }
+        assert providers["outlook_rt"]["configured"] is False
+        assert any(
+            field["name"] == "outlook_rt_inventory"
+            for field in providers["outlook_rt"]["fields"]
+        )
         assert providers["duckmail"]["configured"] is True
         assert providers["cloudmail"]["configured"] is False
         random_subdomain = next(

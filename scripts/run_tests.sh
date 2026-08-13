@@ -14,6 +14,8 @@ tests=(
   tests/test_runtime_platform.py
   tests/test_windows_runtime.py
   tests/test_sso_recovery.py
+  tests/test_sso_state.py
+  tests/test_registration_risk_gate.py
   tests/test_bfs_detect.py
   tests/test_bfs_ops.py
   tests/test_bfs_worker_integration.py
@@ -25,6 +27,7 @@ tests=(
   tests/test_proxy_worker_integration.py
   tests/test_email_provider_store.py
   tests/test_ti_temp_mail.py
+  tests/test_outlook_rt.py
   tests/test_email_domain_store.py
   tests/test_email_domain_worker_integration.py
   tests/test_star_history.py
@@ -61,7 +64,9 @@ done
   account_login_flow.py \
   account_login_worker.py \
   scripts/check_bfs.py \
+  scripts/check_sso_state.py \
   webui/bfs_ops.py \
+  webui/sso_state_ops.py \
   static_asset_cache.py \
   batch_traffic.py \
   retry_policy.py \

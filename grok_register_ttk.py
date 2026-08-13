@@ -38,6 +38,7 @@ from email_providers import duckmail as duckmail_provider
 from email_providers import mailnest as mailnest_provider
 from email_providers import moemail as moemail_provider
 from email_providers import ti_temp_mail as ti_temp_mail_provider
+from email_providers import outlook_rt as outlook_rt_provider
 from email_providers import yyds as yyds_provider
 from email_providers.common import extract_verification_code as _extract_code
 from email_providers.common import generate_username as _generate_username
@@ -238,6 +239,10 @@ DEFAULT_CONFIG = {
     "ti_temp_mail_api_key": "",
     "ti_temp_mail_domain": "",
     "ti_temp_mail_mode": "maindomain",
+    # Outlook MSA refresh_token 库存（jsonl: email + refresh_token）
+    "outlook_rt_inventory": "",
+    "outlook_rt_used_path": "",
+    "outlook_rt_client_id": outlook_rt_provider.DEFAULT_CLIENT_ID,
     # 账号间注册间隔（秒），0=不等待。填一个整数=N秒固定等待，填区间"60-120"=随机等待
     "account_interval": "60-120",
 }
@@ -956,22 +961,45 @@ def _append_sso_bfs_flagged(email: str, sso: str, details: str, log_callback=Non
             log_callback(f"[CPA] 保存 bfs 标记记录失败: {exc}")
 
 
+def _registration_risk_should_block(state: dict) -> tuple:
+    """是否隔离当前 SSO，阻止其进入正常账号池和后续 OAuth。
+
+    升级后额外拦住：
+      - botFlagSource in (1, 2)（含 IP farm soft-flag / castle 等）
+      - policy=deny 且 event 非 registration（如 $login）
+    读不到风控字段时不硬拦，交给上层继续。
+    """
+    if not isinstance(state, dict):
+        return False, ""
+    details = str(state.get("bot_flag_details") or "").strip()
+    bf = state.get("bot_flag_source")
+    policy = str(state.get("policy") or "").strip().lower()
+    event = str(state.get("event") or "").strip()
+
+    # 1) 注册硬拒绝（原逻辑）
+    if state.get("denied"):
+        return True, details or "policy=deny,event=$registration"
+
+    # 2) botFlagSource=1/2：含 soft-flag IP 农场、castle 等（原先放行）
+    if bf in (1, 2):
+        return True, details or ("botFlagSource=%s" % bf)
+
+    # 3) policy=deny 其它 event（如 $login，原先放行）
+    if policy == "deny":
+        return True, details or ("policy=deny,event=%s" % (event or "unknown"))
+
+    return False, ""
+
+
 def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
-    """检查新账号是否被注册风控拒绝；无法判定时继续原有 OAuth 路径。"""
-    if not config.get("cpa_auto_add", False):
-        return {}
-    if not any(
-        str(config.get(key, "") or "").strip()
-        for key in ("cpa_auth_dir", "cpa_remote_url", "grok2api_auth_dir")
-    ):
-        return {}
+    """检查新账号风控状态；命中时保存 SSO 到隔离文件并终止正常入库。"""
     sso = _normalize_sso_token(raw_token)
     if not sso:
         raise RegistrationRiskDenied("注册风控检查失败: sso 为空")
 
     def _risk_log(message):
         if log_callback:
-            log_callback(f"[CPA] {str(message).strip()}")
+            log_callback(f"[风控] {str(message).strip()}")
 
     _risk_log("检查新账号注册风控状态 ...")
     state = _s2cpa.inspect_sso_account_state(
@@ -979,8 +1007,9 @@ def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
         proxy=_resolve_cpa_proxy(),
         log=_risk_log,
     )
-    if state.get("denied"):
-        details = str(state.get("bot_flag_details") or "policy=deny,event=$registration")
+    block, details = _registration_risk_should_block(state)
+    if block:
+        details = str(details or state.get("bot_flag_details") or "registration_risk")
         _append_sso_risk_rejected(email, sso, details, log_callback=log_callback)
         try:
             _bf = state.get("bot_flag_source")
@@ -1008,6 +1037,8 @@ def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
         )
     if not state.get("found"):
         _risk_log(f"未读取到注册风控字段，继续 OAuth: {state.get('error') or 'unknown'}")
+    elif state.get("bot_flag_source") == 0:
+        _risk_log("注册风控状态可用: botFlagSource=0")
     return state
 
 
@@ -1842,12 +1873,69 @@ def get_email_and_token(api_key=None):
                 ) from primary_exc
     if provider == "mailnest":
         return mailnest_buy_email(), "_"
+    if provider == "outlook_rt":
+        return outlook_rt_take_mailbox()
     return duckmail_provider.create_mailbox(
         http_get,
         http_post,
         get_duckmail_api_base(),
         api_key=api_key or get_duckmail_api_key(),
         expires_in=0,
+    )
+
+
+def get_outlook_rt_inventory():
+    return str(config.get("outlook_rt_inventory", "") or "").strip()
+
+
+def get_outlook_rt_used_path():
+    return str(config.get("outlook_rt_used_path", "") or "").strip()
+
+
+def get_outlook_rt_client_id():
+    return (
+        str(config.get("outlook_rt_client_id", "") or "").strip()
+        or outlook_rt_provider.DEFAULT_CLIENT_ID
+    )
+
+
+def outlook_rt_take_mailbox():
+    inv = get_outlook_rt_inventory()
+    if not inv:
+        raise Exception(
+            "请在配置中填写 outlook_rt_inventory（jsonl/文本库存路径，"
+            "字段 email + refresh_token）"
+        )
+    # 取号后立刻 refresh 预检：死 RT 秒退并 mark used，不进入 180s 等码
+    return outlook_rt_provider.take_mailbox(
+        inv,
+        used_path=get_outlook_rt_used_path(),
+        default_client_id=get_outlook_rt_client_id(),
+        http_post=http_post,
+        log_callback=None,
+        max_attempts=10,
+    )
+
+
+def outlook_rt_get_code(
+    token_key,
+    email,
+    timeout=180,
+    poll_interval=4,
+    log_callback=None,
+    cancel_callback=None,
+):
+    return outlook_rt_provider.wait_for_code(
+        http_get,
+        http_post,
+        token_key,
+        email,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        raise_if_cancelled=raise_if_cancelled,
+        sleep_with_cancel=sleep_with_cancel,
+        log_callback=log_callback,
+        cancel_callback=cancel_callback,
     )
 
 
@@ -1916,6 +2004,15 @@ def get_oai_code(
             email,
             timeout=timeout,
             poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+        )
+    if provider == "outlook_rt":
+        return outlook_rt_get_code(
+            dev_token,
+            email,
+            timeout=timeout,
+            poll_interval=max(3, int(poll_interval or 4)),
             log_callback=log_callback,
             cancel_callback=cancel_callback,
         )
@@ -2623,6 +2720,10 @@ class GrokRegisterGUI:
             config_frame,
             self.email_provider_var,
             ["duckmail", "yyds", "cloudflare", "mailnest", "cloudmail", "moemail", "ti-temp-mail"],
+            [
+                "duckmail", "yyds", "cloudflare", "mailnest", "cloudmail", "moemail",
+                "ti-temp-mail", "outlook_rt",
+            ],
             width=12,
         )
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
@@ -2933,6 +3034,65 @@ class GrokRegisterGUI:
             ),
         ]
 
+        # Outlook RT 库存（jsonl: email + refresh_token）
+        self.outlook_rt_inventory_var = tk.StringVar(
+            value=str(config.get("outlook_rt_inventory", "") or "")
+        )
+        self.outlook_rt_used_path_var = tk.StringVar(
+            value=str(config.get("outlook_rt_used_path", "") or "")
+        )
+        self.outlook_rt_client_id_var = tk.StringVar(
+            value=str(
+                config.get("outlook_rt_client_id", outlook_rt_provider.DEFAULT_CLIENT_ID)
+                or outlook_rt_provider.DEFAULT_CLIENT_ID
+            )
+        )
+        self._outlook_rt_widgets = [
+            p_label(0, 0, "库存文件:"),
+            p_field(
+                tk_entry(
+                    self.provider_frame,
+                    textvariable=self.outlook_rt_inventory_var,
+                    width=52,
+                ),
+                0,
+                1,
+                columnspan=3,
+            ),
+            p_label(1, 0, "已用记录（可选）:"),
+            p_field(
+                tk_entry(
+                    self.provider_frame,
+                    textvariable=self.outlook_rt_used_path_var,
+                    width=34,
+                ),
+                1,
+                1,
+            ),
+            p_label(1, 2, "Client ID:"),
+            p_field(
+                tk_entry(
+                    self.provider_frame,
+                    textvariable=self.outlook_rt_client_id_var,
+                    width=34,
+                ),
+                1,
+                3,
+            ),
+            p_label(2, 0, "说明:"),
+            p_field(
+                tk_label(
+                    self.provider_frame,
+                    text="jsonl: email+refresh_token；取号非购买；Graph 收信",
+                    bg=UI_PANEL_BG,
+                ),
+                2,
+                1,
+                columnspan=3,
+                sticky=tk.W,
+            ),
+        ]
+
         self._provider_widget_groups = {
             "duckmail": self._duckmail_widgets,
             "cloudflare": self._cloudflare_widgets,
@@ -2941,6 +3101,7 @@ class GrokRegisterGUI:
             "cloudmail": self._cloudmail_widgets,
             "moemail": self._moemail_widgets,
             "ti-temp-mail": self._ti_temp_mail_widgets,
+            "outlook_rt": self._outlook_rt_widgets,
         }
 
         add_label(3, 0, "并发数（可选）:")
@@ -3118,6 +3279,7 @@ class GrokRegisterGUI:
             "cloudmail": "CloudMail 配置",
             "moemail": "MoeMail 配置",
             "ti-temp-mail": "TI Temp Mail 配置",
+            "outlook_rt": "Outlook RT 库存配置",
         }
         self.provider_frame.configure(text=titles.get(provider, "邮箱服务商配置"))
         for widgets in self._provider_widget_groups.values():
@@ -3218,6 +3380,12 @@ class GrokRegisterGUI:
             config["ti_temp_mail_domain"] = self.ti_temp_mail_domain_var.get().strip()
             config["ti_temp_mail_mode"] = ti_temp_mail_provider.normalize_mode(
                 self.ti_temp_mail_mode_var.get()
+            )
+            config["outlook_rt_inventory"] = self.outlook_rt_inventory_var.get().strip()
+            config["outlook_rt_used_path"] = self.outlook_rt_used_path_var.get().strip()
+            config["outlook_rt_client_id"] = (
+                self.outlook_rt_client_id_var.get().strip()
+                or outlook_rt_provider.DEFAULT_CLIENT_ID
             )
             config["cpa_auto_add"] = bool(self.cpa_auto_add_var.get())
             _mode_text = str(self.cpa_token_mode_var.get()).strip()
@@ -3341,6 +3509,12 @@ class GrokRegisterGUI:
         config["ti_temp_mail_mode"] = ti_temp_mail_provider.normalize_mode(
             self.ti_temp_mail_mode_var.get()
         )
+        config["outlook_rt_inventory"] = self.outlook_rt_inventory_var.get().strip()
+        config["outlook_rt_used_path"] = self.outlook_rt_used_path_var.get().strip()
+        config["outlook_rt_client_id"] = (
+            self.outlook_rt_client_id_var.get().strip()
+            or outlook_rt_provider.DEFAULT_CLIENT_ID
+        )
         config["cpa_auto_add"] = bool(self.cpa_auto_add_var.get())
         _mode_text = str(self.cpa_token_mode_var.get()).strip()
         if "协议" in _mode_text:
@@ -3369,6 +3543,16 @@ class GrokRegisterGUI:
         if config["email_provider"] == "mailnest" and not config["mailnest_api_key"]:
             self.log("[!] MailNest 模式需要先填写 MailNest API Key")
             return
+        if config["email_provider"] == "outlook_rt":
+            inv = get_outlook_rt_inventory()
+            if not inv:
+                self.log("[!] Outlook RT 模式需要填写库存文件路径（jsonl）")
+                return
+            from pathlib import Path as _Path
+
+            if not _Path(inv).expanduser().is_file():
+                self.log(f"[!] Outlook RT 库存文件不存在: {inv}")
+                return
         if config["email_provider"] == "moemail":
             missing = []
             if not get_moemail_api_base():
