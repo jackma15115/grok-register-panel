@@ -480,6 +480,7 @@ xAI 部分 access_token 的 payload 会带 **`bfs` 字段**（常见值 `2`）�
 | `bfs_check` | `true` | 换 token 后检测 |
 | `bfs_skip_cpa` | `false` | 命中 bfs 时跳过 CPA/Grok2API 写入 |
 | `bfs_disable_cpa` | `false` | 命中仍写入，但 `disabled: true` |
+| `sso_risk_check` | `true` | 注册和 SSO→OAuth 前检查 grok.com `botFlagSource` / `policy=deny`；设为 `false` 时跳过该检查，不因风险结果阻断 |
 
 无法解码的 token 会显示为 `unknown`，不会伪造为 clean；启用 `bfs_skip_cpa` 时，面板注册路径的 unknown 账号不会写入 CPA/Grok2API，而是进入待重转队列。CLI 则跳过本次写入并在报告中记为失败。
 

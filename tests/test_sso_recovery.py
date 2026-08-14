@@ -211,6 +211,31 @@ def test_bfs_config_defaults_are_loaded_for_cli():
         assert args.grok2api_auth_dir == str((Path(temp) / "g2a").resolve())
 
 
+def test_sso_risk_config_default_and_override_are_loaded_for_cli():
+    with tempfile.TemporaryDirectory() as temp:
+        config = Path(temp) / "config.json"
+        config.write_text(json.dumps({"sso_risk_check": False}), encoding="utf-8")
+        args = SimpleNamespace(
+            from_config=str(config),
+            cpa_auth_dir=None,
+            grok2api_auth_dir=None,
+            cpa_remote_url=None,
+            cpa_management_key=None,
+            proxy="",
+            prefer=None,
+            sso_risk_check=None,
+            bfs_check=None,
+            bfs_skip_write=None,
+            bfs_disable=None,
+        )
+        apply_config_defaults(args)
+        assert args.sso_risk_check is False
+
+        args.sso_risk_check = True
+        apply_config_defaults(args)
+        assert args.sso_risk_check is True
+
+
 def test_bfs_config_defaults_are_loaded_for_cli():
     with tempfile.TemporaryDirectory() as temp:
         config = Path(temp) / "config.json"

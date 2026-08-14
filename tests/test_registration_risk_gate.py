@@ -130,6 +130,36 @@ def test_unknown_state_continues_without_quarantine():
     assert quarantined == []
 
 
+def test_risk_check_can_be_disabled_without_inspection_or_quarantine():
+    previous = (
+        register.config.get("sso_risk_check"),
+        register._resolve_cpa_proxy,
+        register._s2cpa.inspect_sso_account_state,
+        register._append_sso_risk_rejected,
+    )
+    inspected = []
+    quarantined = []
+    register.config["sso_risk_check"] = False
+    register._resolve_cpa_proxy = lambda: ""
+    register._s2cpa.inspect_sso_account_state = lambda *_args, **_kwargs: inspected.append(True)
+    register._append_sso_risk_rejected = lambda *_args, **_kwargs: quarantined.append(True)
+    try:
+        state = register.ensure_sso_oauth_eligible("ignored-risk-token")
+    finally:
+        value, proxy_fn, inspect_fn, quarantine_fn = previous
+        if value is None:
+            register.config.pop("sso_risk_check", None)
+        else:
+            register.config["sso_risk_check"] = value
+        register._resolve_cpa_proxy = proxy_fn
+        register._s2cpa.inspect_sso_account_state = inspect_fn
+        register._append_sso_risk_rejected = quarantine_fn
+
+    assert state["skipped"] is True
+    assert inspected == []
+    assert quarantined == []
+
+
 if __name__ == "__main__":
     test_registration_risk_policy()
     test_risk_gate_runs_when_cpa_auto_add_is_disabled()

@@ -2180,6 +2180,8 @@ def _config_bool(value: object, default: bool = False) -> bool:
 
 def apply_config_defaults(args) -> None:
     if not args.from_config:
+        if getattr(args, "sso_risk_check", None) is None:
+            args.sso_risk_check = True
         if getattr(args, "bfs_check", None) is None:
             args.bfs_check = True
         if getattr(args, "bfs_skip_write", None) is None:
@@ -2198,6 +2200,8 @@ def apply_config_defaults(args) -> None:
     args.cpa_remote_url = args.cpa_remote_url or str(config.get("cpa_remote_url") or "").strip()
     args.cpa_management_key = args.cpa_management_key or str(config.get("cpa_management_key") or "").strip()
     args.proxy = args.proxy or str(config.get("proxy") or "").strip()
+    if getattr(args, "sso_risk_check", None) is None:
+        args.sso_risk_check = _config_bool(config.get("sso_risk_check"), True)
     if getattr(args, "bfs_check", None) is None:
         args.bfs_check = _config_bool(config.get("bfs_check"), True)
     if getattr(args, "bfs_skip_write", None) is None:
@@ -2299,6 +2303,20 @@ def main() -> int:
         help="禁用换 token 回退（仅用 --prefer 指定路径）",
     )
     ap.add_argument("--proxy", default="", help="OAuth 请求走代理，如 http://127.0.0.1:7890")
+    ap.add_argument(
+        "--sso-risk-check",
+        dest="sso_risk_check",
+        action="store_true",
+        default=None,
+        help="OAuth 前检查 grok.com SSO 风控状态（默认开启，可由 config.json 覆盖）",
+    )
+    ap.add_argument(
+        "--no-sso-risk-check",
+        dest="sso_risk_check",
+        action="store_false",
+        default=None,
+        help="跳过 grok.com SSO 风控检查，不因 botFlag/policy 结果阻断 OAuth",
+    )
     ap.add_argument("--consume-success", action="store_true", help="成功后从 --sso 队列原子移除对应记录")
     ap.add_argument("--report-json", default=None, help="写入不含 token 的运行摘要 JSON")
     ap.add_argument(
@@ -2482,12 +2500,16 @@ def main() -> int:
         email = str(args.email or record.email or "").strip()
         print(f"\n{'=' * 60}\n[{i}/{len(records)}] ...\n{'=' * 60}")
         try:
-            state = inspect_sso_account_state(
-                sso,
-                proxy=args.proxy,
-                log=lambda message: print(f"  {str(message).strip()}"),
-            )
-            if state.get("denied"):
+            state = {"skipped": True, "denied": False}
+            if args.sso_risk_check:
+                state = inspect_sso_account_state(
+                    sso,
+                    proxy=args.proxy,
+                    log=lambda message: print(f"  {str(message).strip()}"),
+                )
+            else:
+                print("  ⏭️ SSO 风控检查已关闭，跳过 botFlag/policy 门禁")
+            if args.sso_risk_check and classify_sso_account_state(state) == "flagged":
                 fail += 1
                 failures.append({"index": i, "email": _mask_report_email(email), "reason": "registration-risk"})
                 print(

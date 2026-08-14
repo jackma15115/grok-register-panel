@@ -226,6 +226,8 @@ DEFAULT_CONFIG = {
     "cpa_management_key": "",
     # Grok2API / ~/.grok 风格 auth 目录（默认项目根目录下 grok2api_auth/）
     "grok2api_auth_dir": "grok2api_auth",
+    # grok.com SSO 风控门禁；关闭后跳过 botFlag/policy 检查，不因其结果阻断 OAuth
+    "sso_risk_check": True,
     "mailnest_api_key": "",
     "mailnest_project_code": "x-ai001",
     # YYDS：留空自动选已验证域名；填写则固定该域名
@@ -996,6 +998,23 @@ def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
     sso = _normalize_sso_token(raw_token)
     if not sso:
         raise RegistrationRiskDenied("注册风控检查失败: sso 为空")
+
+    risk_check = config.get("sso_risk_check", True)
+    if isinstance(risk_check, str):
+        risk_check = risk_check.strip().lower() not in ("", "0", "false", "no", "off")
+    if not risk_check:
+        if log_callback:
+            log_callback("[风控] SSO 风控检查已关闭，跳过 botFlag/policy 门禁")
+        return {
+            "found": False,
+            "skipped": True,
+            "bot_flag_source": None,
+            "bot_flag_details": "",
+            "policy": "",
+            "risk": None,
+            "event": "",
+            "denied": False,
+        }
 
     def _risk_log(message):
         if log_callback:
@@ -2719,7 +2738,6 @@ class GrokRegisterGUI:
         self.email_provider_combo = tk_option_menu(
             config_frame,
             self.email_provider_var,
-            ["duckmail", "yyds", "cloudflare", "mailnest", "cloudmail", "moemail", "ti-temp-mail"],
             [
                 "duckmail", "yyds", "cloudflare", "mailnest", "cloudmail", "moemail",
                 "ti-temp-mail", "outlook_rt",
@@ -2757,6 +2775,13 @@ class GrokRegisterGUI:
             opt_frame, text="调试模式（可选）", variable=self.debug_mode_var
         )
         self.debug_mode_check.pack(side=tk.LEFT, padx=(12, 0))
+        self.sso_risk_check_var = tk.BooleanVar(value=bool(config.get("sso_risk_check", True)))
+        self.sso_risk_check = tk_checkbutton(
+            opt_frame,
+            text="启用 SSO 风控检查",
+            variable=self.sso_risk_check_var,
+        )
+        self.sso_risk_check.pack(side=tk.LEFT, padx=(12, 0))
         self.log_level_var = tk.StringVar(value=str(config.get("log_level", "info") or "info"))
         tk_label(opt_frame, text="日志:", bg=UI_PANEL_BG).pack(side=tk.LEFT, padx=(12, 2))
         self.log_level_combo = tk_option_menu(opt_frame, self.log_level_var, ["info", "debug"], width=6)
@@ -3473,6 +3498,7 @@ class GrokRegisterGUI:
         config["email_provider"] = self.email_provider_var.get().strip() or "cloudflare"
         config["enable_nsfw"] = bool(self.nsfw_var.get())
         config["debug_mode"] = bool(self.debug_mode_var.get())
+        config["sso_risk_check"] = bool(self.sso_risk_check_var.get())
         config["close_browser_on_stop"] = bool(self.close_browser_on_stop_var.get())
         config["log_level"] = (self.log_level_var.get().strip() or "info").lower()
         config["proxy"] = self.proxy_var.get().strip()
