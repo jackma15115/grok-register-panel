@@ -20,6 +20,7 @@ def test_docker_image_contract() -> None:
     assert 'VOLUME ["/data"]' in dockerfile
     assert "/api/health" in dockerfile
     assert "libtk8.6" in dockerfile
+    assert "nodejs" in dockerfile
     assert "import tkinter" in dockerfile
     assert example_config["proxy"] == ""
 

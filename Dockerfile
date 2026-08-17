@@ -55,6 +55,7 @@ RUN apt-get update \
         libxss1 \
         libxtst6 \
         libtk8.6 \
+        nodejs \
         tini \
         tzdata \
         xauth \

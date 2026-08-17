@@ -51,6 +51,32 @@ def test_windows_does_not_select_posix_playwright_wrapper():
             browser_session.os.environ["PLAYWRIGHT_NODEJS_PATH"] = previous
 
 
+def test_linux_without_system_node_uses_playwright_bundled_node():
+    wrapper = str(ROOT / "scripts" / "playwright-node")
+    previous_env = browser_session.os.environ.get("PLAYWRIGHT_NODEJS_PATH")
+    previous_isfile = browser_session.os.path.isfile
+    previous_which = browser_session.shutil.which
+
+    def fake_isfile(path):
+        if str(path) in {"/usr/bin/node", "/usr/local/bin/node"}:
+            return False
+        return previous_isfile(path)
+
+    browser_session.os.environ["PLAYWRIGHT_NODEJS_PATH"] = wrapper
+    browser_session.os.path.isfile = fake_isfile
+    browser_session.shutil.which = lambda _name: None
+    try:
+        browser_session._pin_playwright_node(platform_name="posix")
+        assert "PLAYWRIGHT_NODEJS_PATH" not in browser_session.os.environ
+    finally:
+        browser_session.os.path.isfile = previous_isfile
+        browser_session.shutil.which = previous_which
+        if previous_env is None:
+            browser_session.os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
+        else:
+            browser_session.os.environ["PLAYWRIGHT_NODEJS_PATH"] = previous_env
+
+
 def test_account_gap_sleep_is_cancelable():
     started = time.monotonic()
     grok_register_ttk._sleep_cancelable(2, lambda: True)
@@ -135,6 +161,7 @@ if __name__ == "__main__":
     test_windows_profile_root_uses_local_app_data()
     test_proxy_ip_validation_is_strict()
     test_windows_does_not_select_posix_playwright_wrapper()
+    test_linux_without_system_node_uses_playwright_bundled_node()
     test_account_gap_sleep_is_cancelable()
     test_windows_process_tree_terminates_descendants()
     print("OK windows runtime")
