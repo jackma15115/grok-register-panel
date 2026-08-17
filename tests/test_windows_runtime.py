@@ -37,6 +37,20 @@ def test_proxy_ip_validation_is_strict():
     assert browser_session._normalize_ip_candidate("not-an-ip") == ""
 
 
+def test_windows_does_not_select_posix_playwright_wrapper():
+    wrapper = str(ROOT / "scripts" / "playwright-node")
+    previous = browser_session.os.environ.get("PLAYWRIGHT_NODEJS_PATH")
+    browser_session.os.environ["PLAYWRIGHT_NODEJS_PATH"] = wrapper
+    try:
+        browser_session._pin_playwright_node(platform_name="nt")
+        assert "PLAYWRIGHT_NODEJS_PATH" not in browser_session.os.environ
+    finally:
+        if previous is None:
+            browser_session.os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
+        else:
+            browser_session.os.environ["PLAYWRIGHT_NODEJS_PATH"] = previous
+
+
 def test_account_gap_sleep_is_cancelable():
     started = time.monotonic()
     grok_register_ttk._sleep_cancelable(2, lambda: True)
@@ -120,6 +134,7 @@ def test_windows_process_tree_terminates_descendants():
 if __name__ == "__main__":
     test_windows_profile_root_uses_local_app_data()
     test_proxy_ip_validation_is_strict()
+    test_windows_does_not_select_posix_playwright_wrapper()
     test_account_gap_sleep_is_cancelable()
     test_windows_process_tree_terminates_descendants()
     print("OK windows runtime")

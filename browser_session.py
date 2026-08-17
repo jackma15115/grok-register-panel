@@ -19,27 +19,53 @@ from typing import Callable, Optional, Tuple
 from urllib.parse import urlparse
 
 
-def _pin_playwright_node() -> None:
+def _pin_playwright_node(platform_name: Optional[str] = None) -> None:
     """Playwright 1.60 自带 Node 24，管道对端关闭时 Unhandled EPIPE 会拖死整批。
 
     优先走本仓库 scripts/playwright-node（系统 Node 22 + EPIPE guard）。
     必须在 import playwright / camoufox 之前设置 PLAYWRIGHT_NODEJS_PATH。
     """
-    current = str(os.environ.get("PLAYWRIGHT_NODEJS_PATH") or "").strip()
-    if current and os.path.isfile(current) and os.access(current, os.X_OK):
-        return
     wrapper = Path(__file__).resolve().parent / "scripts" / "playwright-node"
-    if wrapper.is_file():
+    current = str(os.environ.get("PLAYWRIGHT_NODEJS_PATH") or "").strip()
+    system = str(platform_name or os.name).strip().lower()
+    if system == "nt":
+        # This is a POSIX shell script. On Windows it can be selected because
+        # os.access(..., X_OK) is permissive, then Playwright starts no driver
+        # and SafeCamoufox never receives the Playwright callback.
+        if (
+            current
+            and Path(current).suffix.lower() == ".exe"
+            and os.path.isfile(current)
+        ):
+            return
+        os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
+        return
+    if current:
+        try:
+            is_wrapper = Path(current).resolve() == wrapper.resolve()
+        except Exception:
+            is_wrapper = False
+        if not is_wrapper and os.path.isfile(current) and os.access(current, os.X_OK):
+            return
+    system_node = ""
+    for cand in ("/usr/bin/node", "/usr/local/bin/node"):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            system_node = cand
+            break
+    if not system_node:
+        system_node = str(shutil.which("node") or "").strip()
+    if wrapper.is_file() and system_node:
         try:
             wrapper.chmod(wrapper.stat().st_mode | 0o111)
         except Exception:
             pass
         os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(wrapper)
         return
-    for cand in ("/usr/bin/node", "/usr/local/bin/node"):
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
-            os.environ["PLAYWRIGHT_NODEJS_PATH"] = cand
-            return
+    if system_node:
+        os.environ["PLAYWRIGHT_NODEJS_PATH"] = system_node
+    else:
+        # Let Playwright use its bundled driver when no system Node is present.
+        os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
 
 
 _pin_playwright_node()
@@ -191,7 +217,16 @@ class SafeCamoufox(_Camoufox):
         self._connection.call_on_object_with_known_name("Playwright", _callback_wrapper)
         dispatcher_fiber.switch()
 
-        playwright = self._playwright
+        playwright = getattr(self, "_playwright", None)
+        if playwright is None:
+            try:
+                super().__exit__(None, None, None)
+            except BaseException:
+                pass
+            raise RuntimeError(
+                "Playwright driver did not initialize; check PLAYWRIGHT_NODEJS_PATH "
+                "and the Node/Playwright installation"
+            )
         playwright.stop = self.__exit__
 
         # Camoufox 特有：启动浏览器
