@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import random
 import string
+import unicodedata
 from typing import Any, List, Optional
 
 
@@ -61,6 +62,22 @@ def pick_list_payload(data: Any) -> List[dict]:
 
 # xAI 邮件验证码：XXX-YYY（如 QO7-TUD / CXX-PC2 / XSB-802）
 _CODE_RE = re.compile(r"\b([A-Za-z0-9]{3}-[A-Za-z0-9]{3})\b")
+_DASH_TRANSLATION = str.maketrans({
+    ch: "-"
+    for ch in "‐‑‒–—―−﹘﹣－"
+})
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200d\u2060\ufeff]")
+
+
+def _normalize_mail_text(value: object) -> str:
+    """Normalize provider text before matching codes.
+
+    SMTP/MIME decoders and browser APIs may use non-breaking spaces, Unicode
+    dashes, or zero-width markers that are visually indistinguishable in logs.
+    """
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.translate(_DASH_TRANSLATION)
+    return _ZERO_WIDTH_RE.sub("", text)
 
 # CloudMail / 邮件模板 HTML 常见左词（per-100、max-100…）
 _BAD_LEFT = {
@@ -147,8 +164,8 @@ def extract_verification_code(text: str, subject: str = "") -> Optional[str]:
     CloudMail 等会把管理后台 HTML（含 per-100 等 class）拼进正文；
     旧逻辑取「第一个 XXX-YYY」会误把 per-100 当成验证码。
     """
-    subject = subject or ""
-    text = text or ""
+    subject = _normalize_mail_text(subject)
+    text = _normalize_mail_text(text)
 
     m = re.search(r"^([A-Za-z0-9]{3}-[A-Za-z0-9]{3})\s+xAI\b", subject, re.IGNORECASE)
     if m and _is_plausible_xai_code(m.group(1)):

@@ -46,8 +46,14 @@ def test_spacexai_numeric_confirmation_code():
     assert extract_verification_code("margin 100-200 padding 12px", "") is None
 
 
+def test_spacexai_subject_normalizes_mime_spacing_and_dash():
+    subject = "SpaceXAI\u00a0confirmation\u00a0code:\u200b320\u2011638"
+    assert extract_verification_code("", subject) == "320-638"
+
+
 if __name__ == "__main__":
     test_reject_per100()
     test_subject_wins()
     test_mixed_real_codes()
+    test_spacexai_subject_normalizes_mime_spacing_and_dash()
     print("OK extract_code")
