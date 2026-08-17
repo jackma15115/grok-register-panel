@@ -98,6 +98,36 @@ def test_wait_logs_poll_recovery_without_tokens():
     assert "mailbox-token-secret" not in output
 
 
+def test_wait_extracts_numeric_code_when_subject_is_truncated():
+    with patch.object(
+        ti_temp_mail,
+        "fetch_messages",
+        return_value=[
+            {
+                "id": "message-1",
+                "subject": "S",
+                "from": "noreply@x.ai",
+                "html": (
+                    "<p>Validate your email</p>"
+                    "<p>Please use the code below: <strong>427-599</strong></p>"
+                ),
+            }
+        ],
+    ):
+        code = ti_temp_mail.wait_for_code(
+            MagicMock(),
+            "https://keldie.cyou",
+            "mailbox-token-secret",
+            "person@example.test",
+            timeout=2,
+            poll_interval=0.4,
+            raise_if_cancelled=lambda _callback: None,
+            sleep_with_cancel=lambda _seconds, _callback: None,
+        )
+
+    assert code == "427-599"
+
+
 def test_panel_provider_schema_supports_ti_fields():
     state = email_provider_store._public_state({})
     providers = {item["id"]: item for item in state["providers"]}
@@ -126,5 +156,6 @@ if __name__ == "__main__":
     test_provider_normalization_and_create_modes()
     test_fetch_uses_mailbox_token_and_reports_detail_errors()
     test_wait_logs_poll_recovery_without_tokens()
+    test_wait_extracts_numeric_code_when_subject_is_truncated()
     test_panel_provider_schema_supports_ti_fields()
     print("OK TI Temp Mail")

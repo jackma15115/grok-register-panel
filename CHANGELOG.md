@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.4 - 2026-08-16
+
 ### Added
 
 - Add authenticated ZIP exports for all CPA and Grok2API credential files from their configured auth directories.
@@ -16,6 +18,13 @@
 - Make panel process management and batch launch platform-aware: `psutil` discovery, Linux auto-Xvfb, macOS direct launch, Windows virtualenv paths, and actionable missing-procfs errors.
 - Persist owner-only batch traffic history and show rolling average traffic per batch and per successful account in the live panel.
 - Add an SSO risk panel and CLI that check `botFlagSource` / `policy=deny` from existing SSO cookies without exchanging tokens; panel exports contain redacted state only, while reusable clean SSO remains host-local.
+- Pin Camoufox/Playwright to system Node 22 plus an EPIPE socket guard so a dead browser pipe no longer kills the whole batch.
+- Default browser fingerprints to Windows (UA / WebGL / Segoe) even when the host is Linux Xvfb.
+
+### Fixed
+
+- After x.ai shows the Next.js “error loading this page” overlay, keep waiting for the SSO redirect instead of hard-reloading `/sign-up` (that reload was aborting createAccount).
+- Treat Playwright `EPIPE` / `TargetClosed` as a retryable browser failure and rotate the sticky exit.
 
 ## 0.4.2 - 2026-08-11
 
