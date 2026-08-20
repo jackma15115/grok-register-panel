@@ -8,8 +8,15 @@ import io
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from sso_to_auth_json import cpa_auth_filename, grok2api_auth_filename
 
 try:
     from secure_files import atomic_write_json, atomic_write_text, exclusive_file_lock
@@ -24,7 +31,6 @@ except ImportError:  # running from webui/
     from security_utils import redact_log_line  # type: ignore
 
 
-ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = Path(
     os.environ.get(
         "ACCOUNT_LOGIN_STATE_FILE",
@@ -33,6 +39,16 @@ STATE_PATH = Path(
 )
 LOCK_PATH = STATE_PATH.with_suffix(STATE_PATH.suffix + ".lock")
 ACCOUNT_FILES_DIR = ROOT / "accounts"
+CONFIG_FILE = Path(
+    os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
+)
+
+_ACCOUNT_SIDE_FILES = {
+    "mail_credentials.txt",
+    "sso_pending.txt",
+    "sso_risk_rejected.txt",
+    "sso_bfs_flagged.txt",
+}
 
 MAX_EMAIL_LENGTH = 254
 MAX_PASSWORD_LENGTH = 1024
@@ -59,6 +75,11 @@ def _utc_now() -> str:
 
 def _account_id(email: str) -> str:
     return hashlib.sha256(email.encode("utf-8")).hexdigest()[:20]
+
+
+def _sso_fingerprint(sso: object) -> str:
+    value = str(sso or "").strip()
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else "missing"
 
 
 def _clean_text(value: object, limit: int = 240) -> str:
@@ -267,11 +288,164 @@ def _write_unlocked(state: dict) -> None:
 
 
 def _write_account_file(email: str, password: str, sso: str) -> None:
-    safe_email = email.replace("/", "_").replace("\\", "_")
     atomic_write_text(
-        ACCOUNT_FILES_DIR / f"{safe_email}.txt",
+        _account_file_path(email),
         f"{email}----{password}----{sso}\n",
     )
+
+
+def _account_file_path(email: str) -> Path:
+    safe_email = str(email or "").replace("/", "_").replace("\\", "_")
+    return ACCOUNT_FILES_DIR / f"{safe_email}.txt"
+
+
+def _read_config() -> dict:
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _configured_auth_dir(kind: str, config: dict | None = None) -> Path:
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"cpa", "grok2api"}:
+        raise ValueError(f"unknown auth directory kind: {kind}")
+    env_key = "CPA_AUTH_DIR" if normalized == "cpa" else "GROK2API_AUTH_DIR"
+    config_key = "cpa_auth_dir" if normalized == "cpa" else "grok2api_auth_dir"
+    default_name = "cpa_auth" if normalized == "cpa" else "grok2api_auth"
+    explicit = str(os.environ.get(env_key) or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    current = config if isinstance(config, dict) else _read_config()
+    raw = str(current.get(config_key) or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = CONFIG_FILE.parent / path
+        return path.resolve()
+    return (ROOT / default_name).resolve()
+
+
+def _auth_file_paths(email: str, config: dict | None = None) -> tuple[Path, Path]:
+    current = config if isinstance(config, dict) else _read_config()
+    cpa_name = cpa_auth_filename({"email": email})
+    g2a_name = grok2api_auth_filename({}, email=email)
+    return (
+        _configured_auth_dir("cpa", current) / cpa_name,
+        _configured_auth_dir("grok2api", current) / g2a_name,
+    )
+
+
+def _is_direct_file(path: Path) -> bool:
+    try:
+        return path.is_file() and not path.is_symlink()
+    except OSError:
+        return False
+
+
+def _account_file_record(path: Path) -> dict | None:
+    if not _is_direct_file(path):
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "----" not in line:
+            continue
+        parts = line.split("----")
+        try:
+            email = _normalize_email(parts[0])
+        except AccountImportError:
+            continue
+        if path.name.lower() != _account_file_path(email).name.lower():
+            continue
+        if len(parts) >= 3:
+            password = "----".join(parts[1:-1]).strip()
+            raw_sso = parts[-1]
+        else:
+            password = parts[1].strip()
+            raw_sso = ""
+        try:
+            password = _normalize_password(password)
+        except AccountImportError:
+            password = ""
+        try:
+            sso = normalize_sso(raw_sso)
+        except AccountImportError:
+            sso = ""
+        try:
+            updated_at = datetime.fromtimestamp(
+                path.stat().st_mtime, tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except OSError:
+            updated_at = ""
+        return {
+            "id": _account_id(email),
+            "email": email,
+            "password": password,
+            "status": "registered",
+            "sso": sso,
+            "cpa_ok": False,
+            "last_error": "",
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "last_login_at": "",
+            "source": "registered",
+        }
+    return None
+
+
+def _registered_accounts() -> dict[str, dict]:
+    records: dict[str, dict] = {}
+    if not ACCOUNT_FILES_DIR.is_dir():
+        return records
+    try:
+        paths = sorted(ACCOUNT_FILES_DIR.glob("*.txt"), key=lambda item: item.name.lower())
+    except OSError:
+        return records
+    for path in paths:
+        if path.name in _ACCOUNT_SIDE_FILES or path.name.startswith("accounts_"):
+            continue
+        record = _account_file_record(path)
+        if record:
+            records[record["email"]] = record
+    return records
+
+
+def private_account_inventory() -> list[dict]:
+    """Return imported and registered accounts with credentials for local workers."""
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+    by_email: dict[str, dict] = {}
+    for item in state["items"]:
+        merged = dict(item)
+        merged["source"] = "imported"
+        by_email[item["email"]] = merged
+
+    for email, registered in _registered_accounts().items():
+        existing = by_email.get(email)
+        if existing is None:
+            by_email[email] = dict(registered)
+            continue
+        existing["source"] = "both"
+        if not existing.get("password") and registered.get("password"):
+            existing["password"] = registered["password"]
+        if not existing.get("sso") and registered.get("sso"):
+            existing["sso"] = registered["sso"]
+        if not existing.get("updated_at") and registered.get("updated_at"):
+            existing["updated_at"] = registered["updated_at"]
+
+    config = _read_config()
+    for item in by_email.values():
+        cpa_path, g2a_path = _auth_file_paths(item["email"], config)
+        item["cpa_local"] = _is_direct_file(cpa_path)
+        item["grok2api_local"] = _is_direct_file(g2a_path)
+        item["cpa_ok"] = bool(item.get("cpa_ok") or item["cpa_local"])
+        item["login_eligible"] = item.get("source") in {"imported", "both"}
+    return [by_email[email] for email in sorted(by_email)]
 
 
 def _public_item(item: dict) -> dict:
@@ -286,13 +460,16 @@ def _public_item(item: dict) -> dict:
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
         "last_login_at": item.get("last_login_at") or "",
+        "source": item.get("source") or "imported",
+        "cpa_local": bool(item.get("cpa_local")),
+        "grok2api_local": bool(item.get("grok2api_local")),
+        "login_eligible": bool(item.get("login_eligible", True)),
     }
 
 
 def read_account_inventory() -> dict:
-    with exclusive_file_lock(LOCK_PATH):
-        state = _read_unlocked()
-    items = sorted((_public_item(item) for item in state["items"]), key=lambda item: item["email"])
+    private_items = private_account_inventory()
+    items = [_public_item(item) for item in private_items]
     summary = {
         "total": len(items),
         "pending": sum(1 for item in items if item["status"] in {"pending", "cancelled"}),
@@ -312,7 +489,7 @@ def read_account_inventory() -> dict:
         "cpa_success": sum(1 for item in items if item["cpa_ok"]),
         "failed": sum(1 for item in items if item["status"] == "failed"),
     }
-    return {"ok": True, "items": items, "summary": summary, "updated_at": state["updated_at"]}
+    return {"ok": True, "items": items, "summary": summary, "updated_at": _utc_now()}
 
 
 def import_account_credentials(text: object) -> dict:
@@ -529,3 +706,124 @@ def delete_accounts(ids: object) -> dict:
         if deleted:
             _write_unlocked(state)
     return {"ok": True, "deleted": deleted}
+
+
+def _auth_file_matches_email(path: Path, email: str) -> bool:
+    if not _is_direct_file(path):
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    values = [data]
+    values.extend(value for value in data.values() if isinstance(value, dict))
+    wanted = str(email or "").strip().lower()
+    return any(str(value.get("email") or "").strip().lower() == wanted for value in values)
+
+
+def _resource_paths_for_emails(emails: set[str]) -> list[Path]:
+    paths: set[Path] = set()
+    for email in emails:
+        paths.add(_account_file_path(email))
+        paths.update(
+            path
+            for path in ACCOUNT_FILES_DIR.glob("*.txt")
+            if _account_file_record(path) and _account_file_record(path).get("email") in emails
+        )
+        cpa_path, g2a_path = _auth_file_paths(email)
+        paths.add(cpa_path)
+        paths.add(g2a_path)
+        for auth_dir, pattern in (
+            (cpa_path.parent, "xai-*.json"),
+            (g2a_path.parent, "g2a-*.json"),
+        ):
+            try:
+                paths.update(
+                    path for path in auth_dir.glob(pattern) if _auth_file_matches_email(path, email)
+                )
+            except OSError:
+                pass
+    return sorted(paths, key=lambda path: str(path).lower())
+
+
+def _remove_matching_side_file(path: Path, emails: set[str]) -> int:
+    if not _is_direct_file(path):
+        return 0
+    try:
+        with exclusive_file_lock(path.with_suffix(path.suffix + ".lock")):
+            lines = path.read_text(encoding="utf-8").splitlines()
+            kept: list[str] = []
+            removed = 0
+            for line in lines:
+                raw = line.strip()
+                candidate = raw.split("----", 1)[0].split("\t", 1)[0].strip().lower()
+                if candidate in emails:
+                    removed += 1
+                else:
+                    kept.append(line)
+            if removed:
+                body = "\n".join(kept) + ("\n" if kept else "")
+                atomic_write_text(path, body)
+            return removed
+    except (OSError, UnicodeError):
+        return 0
+
+
+def delete_account_resources(
+    ids: object,
+    *,
+    expected_sso_fingerprints: dict[str, str] | None = None,
+) -> dict:
+    """Delete selected local account data across imported and registered stores."""
+    requested = {str(value or "").strip() for value in (ids or []) if str(value or "").strip()}
+    if not requested:
+        raise AccountImportError("no account ids selected")
+    inventory = {item["id"]: item for item in private_account_inventory()}
+    selected = [inventory[item_id] for item_id in requested if item_id in inventory]
+    if not selected:
+        return {"ok": True, "deleted": 0, "removed_files": [], "errors": []}
+    emails = {str(item["email"]).strip().lower() for item in selected}
+    removed_files: list[str] = []
+    errors: list[dict] = []
+    expected = expected_sso_fingerprints or {}
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+        state_by_id = {item["id"]: item for item in state["items"]}
+        registered = _registered_accounts()
+        for item in selected:
+            expected_fingerprint = str(expected.get(item["id"]) or "")
+            if not expected_fingerprint:
+                continue
+            imported = state_by_id.get(item["id"])
+            registered_item = registered.get(item["email"])
+            current_sso = str((imported or {}).get("sso") or "")
+            if not current_sso:
+                current_sso = str((registered_item or {}).get("sso") or "")
+            if _sso_fingerprint(current_sso) != expected_fingerprint:
+                raise AccountImportError("one or more selected accounts changed after the SSO check")
+        before = len(state["items"])
+        state["items"] = [item for item in state["items"] if item["email"] not in emails]
+        if len(state["items"]) != before:
+            _write_unlocked(state)
+
+    for side_name in ("sso_pending.txt", "sso_risk_rejected.txt", "sso_bfs_flagged.txt", "mail_credentials.txt"):
+        side_path = ACCOUNT_FILES_DIR / side_name
+        _remove_matching_side_file(side_path, emails)
+
+    for path in _resource_paths_for_emails(emails):
+        if not _is_direct_file(path):
+            continue
+        try:
+            path.unlink()
+            removed_files.append(str(path))
+        except OSError as exc:
+            errors.append({"path": str(path), "error": _clean_text(exc)})
+    return {
+        "ok": not errors,
+        "deleted": len(selected),
+        "emails": len(emails),
+        "removed_files": removed_files,
+        "errors": errors,
+    }

@@ -291,6 +291,8 @@ def test_imported_account_login_panel_structure():
     assert 'id="account-login-input"' in html
     assert 'id="account-sso-match-input"' in html
     assert 'id="account-sso-match-start"' in html
+    assert 'id="account-sso-check-start"' in html
+    assert 'id="account-sso-delete-invalid"' in html
     assert 'id="account-login-concurrency"' in html
     assert 'id="account-login-cpa"' in html
     assert 'id="account-login-select-all"' in html
@@ -312,6 +314,8 @@ def test_imported_account_login_panel_structure():
     assert 'function toggleAccountLoginSelectAll(' in mon
     assert '/api/account-login/import' in mon
     assert '/api/account-login/match-sso' in mon
+    assert '/api/account-login/sso-check' in mon
+    assert '/api/account-login/delete-invalid' in mon
     assert '/api/account-login/start' in mon
     assert '/api/account-login/stop' in mon
     assert '/api/account-login/delete' in mon

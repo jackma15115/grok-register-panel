@@ -562,6 +562,52 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
             assert json.loads(body)["job_kind"] == "sso_match"
             assert match_secret not in body.decode("utf-8")
 
+            status, _, _ = request(
+                base + "/api/account-login/sso-check",
+                method="POST",
+                body=b"{}",
+            )
+            assert status == 401
+            with patch.object(
+                monitor,
+                "start_sso_check",
+                return_value={
+                    "ok": True,
+                    "running": True,
+                    "job_kind": "sso_check",
+                    "input_count": 1,
+                },
+            ):
+                status, _, body = request(
+                    base + "/api/account-login/sso-check",
+                    token=token,
+                    method="POST",
+                    body=b"{}",
+                )
+            assert status == 202
+            assert json.loads(body)["job_kind"] == "sso_check"
+
+            delete_payload = json.dumps({"ids": ["a" * 20]}).encode("utf-8")
+            status, _, _ = request(
+                base + "/api/account-login/delete-invalid",
+                method="POST",
+                body=delete_payload,
+            )
+            assert status == 401
+            with patch.object(
+                monitor,
+                "delete_checked_invalid_accounts",
+                return_value={"ok": True, "deleted": 1, "removed_files": []},
+            ):
+                status, _, body = request(
+                    base + "/api/account-login/delete-invalid",
+                    token=token,
+                    method="POST",
+                    body=delete_payload,
+                )
+            assert status == 200
+            assert json.loads(body)["deleted"] == 1
+
             large_accounts = "\n".join(
                 f"bulk{index}@example.test----bulk-password-{index}"
                 for index in range(1800)

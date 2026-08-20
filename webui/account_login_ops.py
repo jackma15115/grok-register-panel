@@ -25,6 +25,7 @@ try:
         read_account_inventory,
         reset_incomplete_accounts,
     )
+    from webui.account_sso_check_ops import sso_check_annotations, sso_check_status
     from webui.process_utils import find_managed_processes, terminate_managed_processes, write_pid_file
     from webui.security_utils import redact_log_line
 except ImportError:  # running from webui/
@@ -41,6 +42,7 @@ except ImportError:  # running from webui/
         read_account_inventory,
         reset_incomplete_accounts,
     )
+    from account_sso_check_ops import sso_check_annotations, sso_check_status  # type: ignore
     from process_utils import find_managed_processes, terminate_managed_processes, write_pid_file  # type: ignore
     from security_utils import redact_log_line  # type: ignore
 
@@ -64,7 +66,7 @@ _LOG_TAIL_LINES = 160
 def _workers() -> list[dict]:
     return find_managed_processes(
         ROOT,
-        ("account_login_worker.py", "account_sso_match_worker.py"),
+        ("account_login_worker.py", "account_sso_match_worker.py", "account_sso_check_worker.py"),
     )
 
 
@@ -73,7 +75,7 @@ def _latest_log_path() -> Path | None:
         paths = sorted(
             (
                 path
-                for path in LOG_DIR.glob("account-login-*.log")
+                for path in LOG_DIR.glob("account-*.log")
                 if path.is_file() and not path.is_symlink()
             ),
             key=lambda path: path.stat().st_mtime,
@@ -271,14 +273,30 @@ def account_login_status() -> dict:
     if not workers and not watcher_pids:
         reset_incomplete_accounts(_stale_job_reason())
     inventory = read_account_inventory()
+    annotations = sso_check_annotations()
+    for item in inventory["items"]:
+        check = annotations.get(item["id"])
+        item["sso_check_status"] = str((check or {}).get("status") or "not_checked")
+        item["sso_check_reason"] = str((check or {}).get("reason") or "")
+        item["sso_check_error"] = str((check or {}).get("error") or "")
+        item["sso_checked_at"] = str((check or {}).get("checked_at") or "")
+    inventory["summary"].update(
+        {
+            "sso_checked": sum(1 for item in inventory["items"] if item["sso_check_status"] != "not_checked"),
+            "sso_valid": sum(1 for item in inventory["items"] if item["sso_check_status"] == "valid"),
+            "sso_invalid": sum(1 for item in inventory["items"] if item["sso_check_status"] == "invalid"),
+        }
+    )
+    check_status = sso_check_status()
     log_tail = _read_latest_log_tail()
     report = _read_report()
     if workers:
-        job_kind = (
-            "sso_match"
-            if any("account_sso_match_worker.py" in str(item.get("cmd") or "") for item in workers)
-            else "account_login"
-        )
+        if any("account_sso_check_worker.py" in str(item.get("cmd") or "") for item in workers):
+            job_kind = "sso_check"
+        elif any("account_sso_match_worker.py" in str(item.get("cmd") or "") for item in workers):
+            job_kind = "sso_match"
+        else:
+            job_kind = "account_login"
     elif watcher_pids:
         with _WATCH_LOCK:
             job_kind = _ACTIVE_JOB_KINDS.get(watcher_pids[0], "account_login")
@@ -293,6 +311,7 @@ def account_login_status() -> dict:
         "log_tail": log_tail["lines"],
         "log_tail_name": log_tail["name"],
         "log_tail_truncated": log_tail["truncated"],
+        "sso_check": check_status,
     }
 
 
@@ -343,7 +362,10 @@ def start_account_login(
         found_ids = {item["id"] for item in records}
         missing = [item_id for item_id in requested if item_id not in found_ids]
         if missing:
-            return {"ok": False, "error": "one or more selected accounts no longer exist"}
+            return {
+                "ok": False,
+                "error": "selected accounts must be present in the imported credential inventory",
+            }
     if not records:
         return {"ok": False, "error": "no imported accounts are ready for login"}
 
@@ -540,7 +562,7 @@ def stop_account_login() -> dict:
         _INTENTIONAL_STOPS.update(int(item["pid"]) for item in workers)
     killed = terminate_managed_processes(
         ROOT,
-        ("account_login_worker.py", "account_sso_match_worker.py"),
+        ("account_login_worker.py", "account_sso_match_worker.py", "account_sso_check_worker.py"),
     )
     reset_incomplete_accounts()
     return {"ok": True, "killed": killed, "status": account_login_status()}

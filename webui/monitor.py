@@ -67,6 +67,11 @@ try:
         start_account_sso_match,
         stop_account_login,
     )
+    from webui.account_sso_check_ops import (
+        delete_checked_invalid_accounts,
+        start_sso_check,
+        stop_sso_check,
+    )
     from webui.process_utils import (
         find_managed_processes,
         terminate_managed_processes,
@@ -122,6 +127,11 @@ except ImportError:  # running as script from webui/
         start_account_login,
         start_account_sso_match,
         stop_account_login,
+    )
+    from account_sso_check_ops import (  # type: ignore
+        delete_checked_invalid_accounts,
+        start_sso_check,
+        stop_sso_check,
     )
     from process_utils import (  # type: ignore
         find_managed_processes,
@@ -2516,7 +2526,7 @@ HTML = r"""<!DOCTYPE html>
 
   <section class="card panel account-login-panel" aria-labelledby="account-login-title">
     <div class="section-head">
-      <h2 id="account-login-title">导入账号管理</h2>
+      <h2 id="account-login-title">账号管理</h2>
       <span class="section-meta mono" id="account-login-status">等待检查</span>
     </div>
     <div class="account-login-controls">
@@ -2541,8 +2551,11 @@ HTML = r"""<!DOCTYPE html>
           <button id="account-login-start-selected" onclick="startAccountLogin('selected')">登录选中</button>
           <button id="account-login-start-pending" onclick="startAccountLogin('sso_missing')">重新登录 SSO 缺失</button>
           <button id="account-login-start-cpa-missing" onclick="startAccountLogin('cpa_missing')">补录 CPA 缺失</button>
+          <button class="primary" id="account-sso-check-start" onclick="startAccountSsoCheck()">检测全部 SSO</button>
+          <button id="account-sso-select-invalid" onclick="selectInvalidAccounts()">选择失效账号</button>
           <button class="danger" id="account-login-stop" onclick="stopAccountLogin()">停止</button>
           <button class="danger" id="account-login-delete" onclick="deleteAccountLoginSelected()">删除选中</button>
+          <button class="danger" id="account-sso-delete-invalid" onclick="deleteInvalidAccounts()">清理选中失效账号</button>
           <button id="account-login-refresh" onclick="refreshAccountLogin(true)">刷新</button>
         </div>
       </div>
@@ -2560,8 +2573,8 @@ HTML = r"""<!DOCTYPE html>
     <div class="msg" id="account-login-msg" role="status" aria-live="polite"></div>
     <div class="account-login-table-wrap">
       <table class="account-login-table">
-        <thead><tr><th>选择</th><th>邮箱</th><th>状态</th><th>SSO</th><th>CPA</th><th>最近结果</th><th>更新时间</th></tr></thead>
-        <tbody id="account-login-body"><tr><td colspan="7" class="account-login-empty">尚未导入账号</td></tr></tbody>
+        <thead><tr><th>选择</th><th>邮箱</th><th>来源</th><th>状态</th><th>SSO</th><th>本地 Auth</th><th>SSO 检测</th><th>最近结果</th><th>更新时间</th></tr></thead>
+        <tbody id="account-login-body"><tr><td colspan="9" class="account-login-empty">暂无账号</td></tr></tbody>
       </table>
     </div>
     <div class="section-head account-login-log-head">
@@ -3480,7 +3493,7 @@ async function stopRecovery() {
 function accountLoginStatusLabel(status) {
   return ({
     pending: "待处理", queued: "排队中", running: "登录中", success: "CPA 成功",
-    sso_only: "SSO 已提取", failed: "失败", cancelled: "已停止"
+    sso_only: "SSO 已提取", failed: "失败", cancelled: "已停止", registered: "注册账号"
   })[status] || String(status || "待处理");
 }
 function accountLoginTime(value) {
@@ -3506,6 +3519,23 @@ function toggleAccountLoginSelectAll() {
   }
   renderAccountLogin(accountLoginData || {});
 }
+function selectInvalidAccounts() {
+  const items = (accountLoginData && accountLoginData.items) || [];
+  selectedAccountLoginIds.clear();
+  items.filter(item => item.sso_check_status === "invalid").forEach(item => selectedAccountLoginIds.add(item.id));
+  renderAccountLogin(accountLoginData || {});
+}
+function accountSourceLabel(source) {
+  return ({ imported: "手动导入", registered: "任务注册", both: "导入 + 注册" })[source] || String(source || "--");
+}
+function accountSsoCheckLabel(item) {
+  if (item.sso_check_status === "valid") return '<span class="sso-verdict clean">有效</span>';
+  if (item.sso_check_status === "invalid") {
+    const detail = item.sso_check_reason === "sso_missing" ? "无 SSO" : "换令牌失败";
+    return `<span class="sso-verdict flagged" title="${esc(item.sso_check_error || detail)}">${esc(detail)}</span>`;
+  }
+  return '<span class="sso-verdict unknown">未检测</span>';
+}
 function renderAccountLogin(data) {
   accountLoginData = data || {};
   const items = accountLoginData.items || [];
@@ -3519,29 +3549,36 @@ function renderAccountLogin(data) {
     ["运行中", (summary.queued || 0) + (summary.running || 0), accountLoginData.running ? "accent" : ""],
     ["SSO 成功", summary.sso_success ?? 0, "ok"],
     ["CPA 成功", summary.cpa_success ?? 0, "ok"],
+    ["SSO 有效", summary.sso_valid ?? 0, "ok"],
+    ["SSO 失效", summary.sso_invalid ?? 0, (summary.sso_invalid || 0) > 0 ? "fail" : ""],
     ["失败", summary.failed ?? 0, (summary.failed || 0) > 0 ? "fail" : ""],
   ].map(([label, value, cls]) => `<div class="chip"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
   const lastReport = accountLoginData.last_report || {};
+  const ssoCheck = accountLoginData.sso_check || {};
   const statusText = accountLoginData.running
-    ? ((accountLoginData.job_kind === "sso_match" ? "SSO 校验中 #" : "登录中 #") + (accountLoginData.pid || "?"))
+    ? (((accountLoginData.job_kind === "sso_check" ? "库存 SSO 检测中 #" : (accountLoginData.job_kind === "sso_match" ? "SSO 校验中 #" : "登录中 #"))) + (accountLoginData.pid || "?"))
+    : (ssoCheck.finished_at
+      ? (`SSO 检测完成 · 有效 ${ssoCheck.valid_count || 0} · 失效 ${ssoCheck.invalid_count || 0}`)
     : (lastReport.fatal_error
       ? ("启动失败: " + lastReport.fatal_error)
       : (lastReport.job_kind === "sso_match"
         ? (`校验完成 · 可用 ${lastReport.matched_count || 0} · 不可用 ${lastReport.unusable_count || 0} · 未匹配 ${lastReport.unmatched_count || 0} · 失败 ${lastReport.failure_count || 0}`)
-        : (lastReport.log ? ("空闲 · 日志 " + lastReport.log) : "空闲")));
+        : (lastReport.log ? ("空闲 · 日志 " + lastReport.log) : "空闲"))));
   document.getElementById("account-login-status").textContent = statusText;
   document.getElementById("account-login-body").innerHTML = items.length ? items.map(item => {
     const statusClass = item.status === "failed" ? "fail" : (item.status === "success" || item.status === "sso_only" ? "ok" : (item.status === "running" || item.status === "queued" ? "accent" : ""));
     return `<tr>
       <td><input class="account-select" type="checkbox" aria-label="选择 ${esc(item.email)}" ${selectedAccountLoginIds.has(item.id) ? "checked" : ""} onchange="toggleAccountLoginSelection('${esc(item.id)}', this.checked)"></td>
       <td class="mono">${esc(item.email)}</td>
+      <td>${esc(accountSourceLabel(item.source))}</td>
       <td class="${statusClass}">${esc(accountLoginStatusLabel(item.status))}</td>
       <td>${item.has_sso ? '<span class="ok">已提取</span>' : '--'}</td>
-      <td>${item.cpa_ok ? '<span class="ok">已写入</span>' : '--'}</td>
-      <td class="account-login-result">${esc(item.last_error || "--")}</td>
+      <td>${item.cpa_local ? '<span class="ok">CPA</span>' : '--'}${item.grok2api_local ? ' <span class="ok">G2A</span>' : ''}</td>
+      <td>${accountSsoCheckLabel(item)}</td>
+      <td class="account-login-result">${esc(item.sso_check_error || item.last_error || "--")}</td>
       <td class="mono">${esc(accountLoginTime(item.updated_at))}</td>
     </tr>`;
-  }).join("") : '<tr><td colspan="7" class="account-login-empty">尚未导入账号</td></tr>';
+  }).join("") : '<tr><td colspan="9" class="account-login-empty">暂无账号</td></tr>';
   const logTail = document.getElementById("account-login-tail");
   const logLines = Array.isArray(accountLoginData.log_tail) ? accountLoginData.log_tail : [];
   const logText = (accountLoginData.log_tail_truncated ? "[... earlier log lines omitted ...]\n" : "")
@@ -3564,8 +3601,13 @@ function renderAccountLogin(data) {
   document.getElementById("account-login-start-selected").disabled = running || selected === 0;
   document.getElementById("account-login-start-pending").disabled = running || !(summary.sso_missing > 0);
   document.getElementById("account-login-start-cpa-missing").disabled = running || !(summary.cpa_missing > 0);
+  document.getElementById("account-sso-check-start").disabled = running || items.length === 0;
+  document.getElementById("account-sso-select-invalid").disabled = !(summary.sso_invalid > 0);
   document.getElementById("account-login-stop").disabled = !running;
-  document.getElementById("account-login-delete").disabled = running || selected === 0;
+  const selectedImported = items.filter(item => selectedAccountLoginIds.has(item.id) && item.login_eligible !== false).length;
+  document.getElementById("account-login-delete").disabled = running || selected === 0 || selectedImported !== selected;
+  const selectedInvalid = items.filter(item => selectedAccountLoginIds.has(item.id) && item.sso_check_status === "invalid").length;
+  document.getElementById("account-sso-delete-invalid").disabled = running || selectedInvalid === 0 || selectedInvalid !== selected;
 }
 async function refreshAccountLogin(authHelp = false) {
   try {
@@ -3600,8 +3642,23 @@ async function startAccountSsoMatch() {
     await refreshAccountLogin(false);
   } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
 }
+async function startAccountSsoCheck() {
+  if (!confirm("检测账号管理中的全部 SSO？检测会逐个尝试换取令牌，期间不能运行注册或账号任务。")) return;
+  setMsg("account-login-msg", "正在启动全部 SSO 检测…", "");
+  try {
+    const data = await api("/api/account-login/sso-check", { method: "POST", body: "{}" });
+    setMsg("account-login-msg", "SSO 检测已启动，共 " + (data.input_count || 0) + " 个账号", "ok");
+    await refreshAccountLogin(false);
+  } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
+}
 async function startAccountLogin(scope) {
-  const ids = scope === "selected" ? selectedAccountLoginList() : [];
+  const selectedIds = scope === "selected" ? selectedAccountLoginList() : [];
+  const selectedItems = (accountLoginData && accountLoginData.items) || [];
+  const ids = scope === "selected" ? selectedItems.filter(item => selectedIds.includes(item.id) && item.login_eligible !== false).map(item => item.id) : [];
+  if (scope === "selected" && selectedIds.length && ids.length !== selectedIds.length) {
+    setMsg("account-login-msg", "任务注册账号没有导入密码，不能启动浏览器登录；可直接检测或清理", "err");
+    return;
+  }
   if (scope === "selected" && !ids.length) { setMsg("account-login-msg", "请先选择账号", "err"); return; }
   const concurrency = Number(document.getElementById("account-login-concurrency").value || 1);
   const extractCpa = document.getElementById("account-login-cpa").checked;
@@ -3628,6 +3685,23 @@ async function deleteAccountLoginSelected() {
     const data = await api("/api/account-login/delete", { method: "POST", body: JSON.stringify({ ids }) });
     selectedAccountLoginIds.clear();
     setMsg("account-login-msg", "已删除 " + (data.deleted || 0) + " 条导入记录", "ok");
+    await refreshAccountLogin(false);
+  } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
+}
+async function deleteInvalidAccounts() {
+  const items = (accountLoginData && accountLoginData.items) || [];
+  const ids = selectedAccountLoginList();
+  const invalid = items.filter(item => ids.includes(item.id) && item.sso_check_status === "invalid");
+  if (!ids.length || invalid.length !== ids.length) {
+    setMsg("account-login-msg", "只能清理最近一次完整检测中确认失效的账号", "err");
+    return;
+  }
+  if (!confirm(`永久清理选中的 ${ids.length} 个失效账号？将删除本地账号文件、账密库存、SSO、CPA 和 Grok2API 数据。`)) return;
+  try {
+    const data = await api("/api/account-login/delete-invalid", { method: "POST", body: JSON.stringify({ ids }) });
+    selectedAccountLoginIds.clear();
+    const warning = data.remote_cpa_not_deleted ? "；远程 CPA 需手动清理" : "";
+    setMsg("account-login-msg", `已清理 ${data.deleted || 0} 个账号、本地文件 ${(data.removed_files || []).length} 个${warning}`, data.errors && data.errors.length ? "err" : "ok");
     await refreshAccountLogin(false);
   } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
 }
@@ -4425,6 +4499,20 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
             return
+        if u.path == "/api/account-login/sso-check":
+            try:
+                with START_LOCK:
+                    result = start_sso_check()
+                self._json(202 if result.get("ok") else 409, result)
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/account-login/sso-check/stop":
+            try:
+                self._json(200, stop_sso_check())
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
         if u.path == "/api/account-login/start":
             try:
                 scope = str((body or {}).get("scope") or "pending").strip().lower()
@@ -4449,6 +4537,15 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/account-login/delete":
             try:
                 result = delete_imported_accounts(body.get("ids"))
+                self._json(200 if result.get("ok") else 409, result)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/account-login/delete-invalid":
+            try:
+                result = delete_checked_invalid_accounts(body.get("ids"))
                 self._json(200 if result.get("ok") else 409, result)
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": redact_log_line(str(exc))})

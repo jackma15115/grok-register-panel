@@ -42,6 +42,7 @@ tests=(
   tests/test_account_login_worker.py
   tests/test_account_login_ops.py
   tests/test_account_sso_match_worker.py
+  tests/test_account_sso_check.py
   tests/test_docker_assets.py
   tests/test_orchestrator_policy.py
 )
@@ -66,10 +67,12 @@ done
   account_login_flow.py \
   account_login_worker.py \
   account_sso_match_worker.py \
+  account_sso_check_worker.py \
   scripts/check_bfs.py \
   scripts/check_sso_state.py \
   webui/bfs_ops.py \
   webui/sso_state_ops.py \
+  webui/account_sso_check_ops.py \
   static_asset_cache.py \
   batch_traffic.py \
   retry_policy.py \

@@ -280,6 +280,8 @@ owner-only 的 `log/batch_traffic_history.json`（最多 500 批），面板据�
 
 ## 8. 导入账号管理
 
+账号管理会合并 `imported_credentials.json` 与注册任务写入的 `accounts/{email}.txt`，并按邮箱去重。可对合并后的账号一键检测 SSO；没有 SSO 或 token 换取失败的账号可人工复核后选择清理。清理会删除本地账号/SSO、CPA、Grok2API 和待处理记录；远程 CPA 记录不会由面板自动删除。
+
 面板的“导入账号管理”支持粘贴 `email + password`，启动 Camoufox 登录并提取 SSO。
 Docker 会把库存保存到 `/data/accounts/imported_credentials.json`，把任务和报告保存到
 `/data/log/`。库存文件包含明文密码，必须保持 `0600`、只做加密或受控备份。
