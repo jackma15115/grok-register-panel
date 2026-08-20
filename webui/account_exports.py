@@ -61,7 +61,7 @@ def sso_values() -> list[str]:
 
 
 def credential_rows() -> list[dict[str, str]]:
-    """Return one email/password row per locally stored account."""
+    """Return one email/password/SSO row per locally stored account."""
     rows: dict[str, dict[str, str]] = {}
     for record in account_records():
         email = str(record.email or "").strip()
@@ -70,8 +70,16 @@ def credential_rows() -> list[dict[str, str]]:
         key = email.lower()
         previous = rows.get(key)
         password = str(record.password or "")
-        if previous is None or (not previous["password"] and password):
-            rows[key] = {"email": email, "password": password}
+        sso = str(record.sso or "")
+        if previous is None:
+            rows[key] = {"email": email, "password": password, "sso": sso}
+            continue
+        previous_complete = bool(previous["password"] and previous["sso"])
+        current_complete = bool(password and sso)
+        if current_complete and not previous_complete:
+            rows[key] = {"email": email, "password": password, "sso": sso}
+        elif not previous["password"] and password and previous["sso"] == sso:
+            previous["password"] = password
     return [rows[key] for key in sorted(rows)]
 
 
@@ -90,9 +98,9 @@ def credentials_csv_export() -> tuple[str, bytes]:
         raise LookupError("没有可导出的账号")
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
-    writer.writerow(["email", "passwd"])
+    writer.writerow(["email", "passwd", "sso"])
     for row in rows:
-        writer.writerow([row["email"], row["password"]])
+        writer.writerow([row["email"], row["password"], row["sso"]])
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     body = ("\ufeff" + output.getvalue()).encode("utf-8")
     return f"grok-register-accounts-{timestamp}.csv", body

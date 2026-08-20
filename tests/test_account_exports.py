@@ -64,9 +64,9 @@ def test_local_exports_include_pending_sso_and_escape_csv():
     assert csv_body.startswith(b"\xef\xbb\xbf")
     parsed = list(csv.reader(io.StringIO(csv_body.decode("utf-8-sig"), newline="")))
     assert parsed == [
-        ["email", "passwd"],
-        ["pending@example.test", ""],
-        ["person@example.test", "comma,quote\""],
+        ["email", "passwd", "sso"],
+        ["pending@example.test", "", TOKEN_B],
+        ["person@example.test", "comma,quote\"", TOKEN_A],
     ]
 
 

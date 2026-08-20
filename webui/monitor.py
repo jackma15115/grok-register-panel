@@ -64,6 +64,7 @@ try:
         delete_imported_accounts,
         import_accounts,
         start_account_login,
+        start_account_sso_match,
         stop_account_login,
     )
     from webui.process_utils import (
@@ -119,6 +120,7 @@ except ImportError:  # running as script from webui/
         delete_imported_accounts,
         import_accounts,
         start_account_login,
+        start_account_sso_match,
         stop_account_login,
     )
     from process_utils import (  # type: ignore
@@ -1381,6 +1383,8 @@ HTML = r"""<!DOCTYPE html>
   }
   .account-login-panel .section-meta { min-width: 0; overflow-wrap: anywhere; }
   .account-login-input { min-height: 116px; }
+  .account-sso-match { margin-top: 14px; }
+  .account-sso-match-input { min-height: 88px; }
   .account-login-side { display: flex; flex-direction: column; gap: 10px; }
   .account-login-options { display: grid; grid-template-columns: minmax(100px, 140px) minmax(0, 1fr); gap: 10px; align-items: end; }
   .inline-check { min-height: 38px; display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 12px; }
@@ -2501,7 +2505,7 @@ HTML = r"""<!DOCTYPE html>
         <button id="recovery-pending" onclick="startRecovery('pending')">补录待处理</button>
         <button id="recovery-accounts" onclick="startRecovery('accounts')">扫描全部账号</button>
         <button id="export-sso" onclick="downloadAccountExport('/api/accounts/export-sso')" title="每行一个 SSO，包含待授权记录">导出 SSO</button>
-        <button id="export-credentials" onclick="downloadAccountExport('/api/accounts/export-credentials-csv')" title="导出全部账号的 email、passwd 列">导出账号 CSV</button>
+        <button id="export-credentials" onclick="downloadAccountExport('/api/accounts/export-credentials-csv')" title="导出全部账号的 email、passwd、sso 列">导出账号 CSV</button>
         <button id="export-cpa-auth" onclick="downloadAccountExport('/api/accounts/export-cpa-auth')" title="打包导出全部 xai-*.json CPA 凭证">导出 CPA 凭证</button>
         <button id="export-grok2api-auth" onclick="downloadAccountExport('/api/accounts/export-grok2api-auth')" title="打包导出全部 g2a-*.json Grok2API 凭证">导出 Grok2API 凭证</button>
         <button class="danger" id="recovery-stop" onclick="stopRecovery()">停止补录</button>
@@ -2517,8 +2521,8 @@ HTML = r"""<!DOCTYPE html>
     </div>
     <div class="account-login-controls">
       <div class="field">
-        <label for="account-login-input">账号密码</label>
-        <textarea class="account-login-input mono" id="account-login-input" placeholder="email----password&#10;email,password&#10;email:password"></textarea>
+        <label for="account-login-input">账号密码（SSO 可选）</label>
+        <textarea class="account-login-input mono" id="account-login-input" placeholder="email----password&#10;email----password----sso&#10;email,password,sso"></textarea>
       </div>
       <div class="account-login-side">
         <div class="account-login-options">
@@ -2535,12 +2539,21 @@ HTML = r"""<!DOCTYPE html>
           <button class="primary" id="account-login-import" onclick="importAccountLoginInput()">导入账号</button>
           <button id="account-login-select-all" onclick="toggleAccountLoginSelectAll()">全选</button>
           <button id="account-login-start-selected" onclick="startAccountLogin('selected')">登录选中</button>
-          <button id="account-login-start-pending" onclick="startAccountLogin('sso_missing')">登录 SSO 缺失</button>
+          <button id="account-login-start-pending" onclick="startAccountLogin('sso_missing')">重新登录 SSO 缺失</button>
           <button id="account-login-start-cpa-missing" onclick="startAccountLogin('cpa_missing')">补录 CPA 缺失</button>
           <button class="danger" id="account-login-stop" onclick="stopAccountLogin()">停止</button>
           <button class="danger" id="account-login-delete" onclick="deleteAccountLoginSelected()">删除选中</button>
           <button id="account-login-refresh" onclick="refreshAccountLogin(true)">刷新</button>
         </div>
+      </div>
+    </div>
+    <div class="account-sso-match">
+      <div class="field">
+        <label for="account-sso-match-input">旧 SSO 校验与账号匹配</label>
+        <textarea class="account-sso-match-input mono" id="account-sso-match-input" placeholder="每行一个 SSO"></textarea>
+      </div>
+      <div class="button-group account-login-actions" style="margin-top:8px">
+        <button class="primary" id="account-sso-match-start" onclick="startAccountSsoMatch()">校验可用 SSO</button>
       </div>
     </div>
     <div class="chips account-login-summary" id="account-login-kpis"></div>
@@ -3510,10 +3523,12 @@ function renderAccountLogin(data) {
   ].map(([label, value, cls]) => `<div class="chip"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
   const lastReport = accountLoginData.last_report || {};
   const statusText = accountLoginData.running
-    ? ("登录中 #" + (accountLoginData.pid || "?"))
+    ? ((accountLoginData.job_kind === "sso_match" ? "SSO 校验中 #" : "登录中 #") + (accountLoginData.pid || "?"))
     : (lastReport.fatal_error
       ? ("启动失败: " + lastReport.fatal_error)
-      : (lastReport.log ? ("空闲 · 日志 " + lastReport.log) : "空闲"));
+      : (lastReport.job_kind === "sso_match"
+        ? (`校验完成 · 可用 ${lastReport.matched_count || 0} · 不可用 ${lastReport.unusable_count || 0} · 未匹配 ${lastReport.unmatched_count || 0} · 失败 ${lastReport.failure_count || 0}`)
+        : (lastReport.log ? ("空闲 · 日志 " + lastReport.log) : "空闲")));
   document.getElementById("account-login-status").textContent = statusText;
   document.getElementById("account-login-body").innerHTML = items.length ? items.map(item => {
     const statusClass = item.status === "failed" ? "fail" : (item.status === "success" || item.status === "sso_only" ? "ok" : (item.status === "running" || item.status === "queued" ? "accent" : ""));
@@ -3541,6 +3556,9 @@ function renderAccountLogin(data) {
   const selected = selectedAccountLoginIds.size;
   const allSelected = items.length > 0 && items.every(item => selectedAccountLoginIds.has(item.id));
   document.getElementById("account-login-import").disabled = running;
+  document.getElementById("account-login-input").disabled = running;
+  document.getElementById("account-sso-match-input").disabled = running;
+  document.getElementById("account-sso-match-start").disabled = running || items.length === 0;
   document.getElementById("account-login-select-all").disabled = items.length === 0;
   document.getElementById("account-login-select-all").textContent = allSelected ? "取消全选" : "全选";
   document.getElementById("account-login-start-selected").disabled = running || selected === 0;
@@ -3566,7 +3584,19 @@ async function importAccountLoginInput() {
   try {
     const data = await api("/api/account-login/import", { method: "POST", body: JSON.stringify({ accounts: value }) });
     input.value = "";
-    setMsg("account-login-msg", `已导入：新增 ${data.added || 0}，更新 ${data.updated || 0}，未变 ${data.unchanged || 0}`, "ok");
+    setMsg("account-login-msg", `已导入：新增 ${data.added || 0}，更新 ${data.updated || 0}，未变 ${data.unchanged || 0}，含 SSO ${data.sso_imported || 0}`, "ok");
+    await refreshAccountLogin(false);
+  } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
+}
+async function startAccountSsoMatch() {
+  const input = document.getElementById("account-sso-match-input");
+  const value = input.value || "";
+  if (!value.trim()) { setMsg("account-login-msg", "请输入 SSO", "err"); return; }
+  setMsg("account-login-msg", "正在启动 SSO 校验任务…", "");
+  try {
+    const data = await api("/api/account-login/match-sso", { method: "POST", body: JSON.stringify({ sso: value }) });
+    input.value = "";
+    setMsg("account-login-msg", "SSO 校验任务已启动，共 " + (data.input_count || 0) + " 条", "ok");
     await refreshAccountLogin(false);
   } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
 }
@@ -4380,6 +4410,16 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = import_accounts(body.get("accounts"))
                 self._json(200 if result.get("ok") else 409, result)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": redact_log_line(str(exc))})
+            return
+        if u.path == "/api/account-login/match-sso":
+            try:
+                with START_LOCK:
+                    result = start_account_sso_match((body or {}).get("sso"))
+                self._json(202 if result.get("ok") else 409, result)
             except ValueError as exc:
                 self._json(400, {"ok": False, "error": redact_log_line(str(exc))})
             except Exception as exc:

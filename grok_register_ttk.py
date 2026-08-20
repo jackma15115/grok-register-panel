@@ -1166,12 +1166,20 @@ def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
     return state
 
 
-def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
+def add_sso_to_cpa(
+    raw_token,
+    email="",
+    log_callback=None,
+    *,
+    token_callback=None,
+    force_exchange=False,
+    retain_failed_sso=True,
+) -> bool:
     """SSO → Device Flow（失败回退授权码）换 token → 写入 CPA / Grok2API。
 
     返回 True 表示入库成功（或未开启/无需转换）；False 表示转换失败（SSO 仍可能已写入 accounts）。
     """
-    if not config.get("cpa_auto_add", False):
+    if not config.get("cpa_auto_add", False) and not force_exchange:
         if log_callback:
             log_callback("[*] 已关闭 SSO→auth，仅保存 SSO（不写 auth）")
         return True
@@ -1186,7 +1194,7 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
     if g2a_dir and not os.path.isabs(g2a_dir):
         g2a_dir = os.path.join(APP_DIR, g2a_dir)
 
-    if not auth_dir and not remote_url and not g2a_dir:
+    if not auth_dir and not remote_url and not g2a_dir and not force_exchange:
         if log_callback:
             log_callback(
                 "[Debug] 已开启 SSO→auth 但未配置 cpa_auth_dir / cpa_remote_url / grok2api_auth_dir，跳过"
@@ -1196,7 +1204,7 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
         if log_callback:
             log_callback("[Debug] 已配置 cpa_remote_url 但未配置 cpa_management_key，跳过远程上传")
         remote_url = ""
-    if not auth_dir and not remote_url and not g2a_dir:
+    if not auth_dir and not remote_url and not g2a_dir and not force_exchange:
         return True
     sso = _normalize_sso_token(raw_token)
     if not sso:
@@ -1252,9 +1260,22 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             browser_approve=browser_cb,
         )
         if not token:
-            _cpa_log("换 token 失败；SSO 已在 accounts 文件，稍后可重转")
-            _append_sso_pending(email, sso, log_callback=log_callback)
+            if retain_failed_sso:
+                _cpa_log("换 token 失败；SSO 已在 accounts 文件，稍后可重转")
+                _append_sso_pending(email, sso, log_callback=log_callback)
+            else:
+                _cpa_log("换 token 失败；校验模式不保留此 SSO")
             return False
+
+        if callable(token_callback):
+            resolved_record = _s2cpa.token_to_cpa_record(
+                token,
+                email=email,
+                sso=sso,
+                check_bfs=False,
+            )
+            if token_callback(token, resolved_record) is False:
+                return False
 
         # JWT bfs 检测（与 botFlagSource 独立；key 存在即标记）
         bfs_check = config.get("bfs_check", True)
@@ -1274,8 +1295,9 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             if not bfs_info.get("ok"):
                 _cpa_log("JWT bfs 检测: unknown（无法解码 token）")
                 if skip_cpa:
-                    _append_sso_pending(email, sso, log_callback=log_callback)
-                    _cpa_log("bfs_skip_cpa=true，未知状态不写入 CPA/Grok2API，已进入待重转队列")
+                    if retain_failed_sso:
+                        _append_sso_pending(email, sso, log_callback=log_callback)
+                    _cpa_log("bfs_skip_cpa=true，未知状态不写入 CPA/Grok2API")
                     return False
             elif bfs_info.get("has_bfs"):
                 detail = (
@@ -1342,7 +1364,8 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
                 _cpa_log(f"Grok2API 写入失败: {g2a_exc}")
         if not wrote_ok:
             _cpa_log("token 已换出但 CPA/Grok2API 均未写入成功")
-            _append_sso_pending(email, sso, log_callback=log_callback)
+            if retain_failed_sso:
+                _append_sso_pending(email, sso, log_callback=log_callback)
             return False
         # 成功写入后把 bfs 记入结果日志（ok 状态由上层注册成功路径再记一次时可能覆盖；此处补一条细节）
         if bfs_check and bfs_info.get("has_bfs"):
@@ -1361,7 +1384,8 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
         return True
     except Exception as exc:
         _cpa_log(f"直出失败: {redact_sensitive_log_line(str(exc))}")
-        _append_sso_pending(email, sso, log_callback=log_callback)
+        if retain_failed_sso:
+            _append_sso_pending(email, sso, log_callback=log_callback)
         return False
 
 

@@ -10,6 +10,7 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -530,6 +531,36 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
             assert sso_secret not in text
             assert "\"password\"" not in text
             assert "\"sso\"" not in text
+
+            match_secret = "match-sso-secret-" + ("s" * 64)
+            match_payload = json.dumps({"sso": match_secret}).encode("utf-8")
+            status, _, body = request(
+                base + "/api/account-login/match-sso",
+                method="POST",
+                body=match_payload,
+            )
+            assert status == 401
+            assert match_secret not in body.decode("utf-8")
+
+            with patch.object(
+                monitor,
+                "start_account_sso_match",
+                return_value={
+                    "ok": True,
+                    "running": True,
+                    "job_kind": "sso_match",
+                    "input_count": 1,
+                },
+            ):
+                status, _, body = request(
+                    base + "/api/account-login/match-sso",
+                    token=token,
+                    method="POST",
+                    body=match_payload,
+                )
+            assert status == 202
+            assert json.loads(body)["job_kind"] == "sso_match"
+            assert match_secret not in body.decode("utf-8")
 
             large_accounts = "\n".join(
                 f"bulk{index}@example.test----bulk-password-{index}"

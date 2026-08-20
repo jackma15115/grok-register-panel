@@ -94,6 +94,43 @@ def test_import_has_no_account_count_limit():
     assert len(records) == 501
 
 
+def test_import_optional_sso_writes_canonical_account_file():
+    with tempfile.TemporaryDirectory() as temp:
+        previous = _with_temp_store(temp)
+        previous_accounts_dir = store.ACCOUNT_FILES_DIR
+        store.ACCOUNT_FILES_DIR = Path(temp) / "accounts"
+        token_one = "s" * 80
+        token_two = "t" * 80
+        try:
+            result = store.import_account_credentials(
+                "email,passwd,sso\n"
+                f"one@example.test,pass-one,sso={token_one}\n"
+                f"two@example.test,pass-two,{token_two}"
+            )
+            assert result["added"] == 2
+            assert result["sso_imported"] == 2
+            private = {item["email"]: item for item in store.private_accounts()}
+            assert private["one@example.test"]["sso"] == token_one
+            assert private["two@example.test"]["sso"] == token_two
+            assert (store.ACCOUNT_FILES_DIR / "one@example.test.txt").read_text(
+                encoding="utf-8"
+            ) == f"one@example.test----pass-one----{token_one}\n"
+
+            public_text = json.dumps(store.read_account_inventory())
+            assert token_one not in public_text
+            assert token_two not in public_text
+            assert "pass-one" not in public_text
+
+            delimited = store.import_account_credentials(
+                f"three@example.test----pass-three----{token_one}"
+            )
+            assert delimited["sso_imported"] == 1
+            assert store.private_accounts()[-1]["sso"] == token_one
+        finally:
+            store.ACCOUNT_FILES_DIR = previous_accounts_dir
+            store.STATE_PATH, store.LOCK_PATH = previous
+
+
 def test_reset_incomplete_accounts_is_scoped_to_job_ids():
     with tempfile.TemporaryDirectory() as temp:
         previous = _with_temp_store(temp)
@@ -156,5 +193,6 @@ if __name__ == "__main__":
     test_import_formats_and_public_secret_redaction()
     test_deduplicate_update_and_status_changes()
     test_import_has_no_account_count_limit()
+    test_import_optional_sso_writes_canonical_account_file()
     test_reset_incomplete_accounts_is_scoped_to_job_ids()
     print("OK account login store")

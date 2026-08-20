@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import signal
 import shutil
 import subprocess
@@ -14,11 +15,12 @@ import traceback
 from pathlib import Path
 
 try:
-    from secure_files import atomic_write_json, ensure_private_dir
+    from secure_files import atomic_write_json, atomic_write_text, ensure_private_dir
     from webui.account_login_store import (
         delete_accounts,
         import_account_credentials,
         mark_accounts_queued,
+        parse_sso_values,
         private_accounts,
         read_account_inventory,
         reset_incomplete_accounts,
@@ -29,11 +31,12 @@ except ImportError:  # running from webui/
     ROOT = Path(__file__).resolve().parent.parent
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from secure_files import atomic_write_json, ensure_private_dir
+    from secure_files import atomic_write_json, atomic_write_text, ensure_private_dir
     from account_login_store import (  # type: ignore
         delete_accounts,
         import_account_credentials,
         mark_accounts_queued,
+        parse_sso_values,
         private_accounts,
         read_account_inventory,
         reset_incomplete_accounts,
@@ -45,6 +48,7 @@ except ImportError:  # running from webui/
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "log"
 WORKER_SCRIPT = ROOT / "account_login_worker.py"
+SSO_MATCH_WORKER_SCRIPT = ROOT / "account_sso_match_worker.py"
 JOB_FILE = Path(os.environ.get("ACCOUNT_LOGIN_JOB_FILE", str(LOG_DIR / "account_login_job.json")))
 REPORT_FILE = Path(os.environ.get("ACCOUNT_LOGIN_REPORT_FILE", str(LOG_DIR / "account_login_report.json")))
 PID_FILE = Path(os.environ.get("ACCOUNT_LOGIN_PID_FILE", str(LOG_DIR / "account_login.pid")))
@@ -52,12 +56,16 @@ VENV_PY = ROOT / ".venv" / "bin" / "python"
 _WATCH_LOCK = threading.Lock()
 _INTENTIONAL_STOPS: set[int] = set()
 _ACTIVE_WATCHERS: set[int] = set()
+_ACTIVE_JOB_KINDS: dict[int, str] = {}
 _LOG_TAIL_BYTES = 48 * 1024
 _LOG_TAIL_LINES = 160
 
 
 def _workers() -> list[dict]:
-    return find_managed_processes(ROOT, ("account_login_worker.py",))
+    return find_managed_processes(
+        ROOT,
+        ("account_login_worker.py", "account_sso_match_worker.py"),
+    )
 
 
 def _latest_log_path() -> Path | None:
@@ -118,6 +126,7 @@ def _read_report() -> dict:
     if not isinstance(data, dict):
         return {}
     return {
+        "job_kind": str(data.get("job_kind") or "account_login")[:40],
         "started_at": str(data.get("started_at") or "")[:40],
         "finished_at": str(data.get("finished_at") or "")[:40],
         "log": Path(str(data.get("log") or "")).name[:160] or _latest_log_name(),
@@ -128,6 +137,10 @@ def _read_report() -> dict:
         "sso_only_count": int(data.get("sso_only_count") or 0),
         "failure_count": int(data.get("failure_count") or 0),
         "cancelled_count": int(data.get("cancelled_count") or 0),
+        "matched_count": int(data.get("matched_count") or 0),
+        "unusable_count": int(data.get("unusable_count") or 0),
+        "unmatched_count": int(data.get("unmatched_count") or 0),
+        "cpa_success_count": int(data.get("cpa_success_count") or 0),
     }
 
 
@@ -192,7 +205,13 @@ def _worker_exit_label(return_code: int) -> str:
     return f"login worker exited with code {return_code}"
 
 
-def _watch_worker(process, ids: list[str], job: dict, log_path: Path) -> None:
+def _watch_worker(
+    process,
+    ids: list[str],
+    job: dict,
+    log_path: Path,
+    cleanup_path: Path | None = None,
+) -> None:
     try:
         try:
             return_code = int(process.wait())
@@ -237,8 +256,11 @@ def _watch_worker(process, ids: list[str], job: dict, log_path: Path) -> None:
         except Exception:
             pass
     finally:
+        if cleanup_path is not None:
+            cleanup_path.unlink(missing_ok=True)
         with _WATCH_LOCK:
             _ACTIVE_WATCHERS.discard(process.pid)
+            _ACTIVE_JOB_KINDS.pop(process.pid, None)
             _INTENTIONAL_STOPS.discard(process.pid)
 
 
@@ -250,11 +272,24 @@ def account_login_status() -> dict:
         reset_incomplete_accounts(_stale_job_reason())
     inventory = read_account_inventory()
     log_tail = _read_latest_log_tail()
+    report = _read_report()
+    if workers:
+        job_kind = (
+            "sso_match"
+            if any("account_sso_match_worker.py" in str(item.get("cmd") or "") for item in workers)
+            else "account_login"
+        )
+    elif watcher_pids:
+        with _WATCH_LOCK:
+            job_kind = _ACTIVE_JOB_KINDS.get(watcher_pids[0], "account_login")
+    else:
+        job_kind = str(report.get("job_kind") or "")
     return {
         **inventory,
         "running": bool(workers or watcher_pids),
         "pid": workers[0]["pid"] if workers else (watcher_pids[0] if watcher_pids else None),
-        "last_report": _read_report(),
+        "job_kind": job_kind,
+        "last_report": report,
         "log_tail": log_tail["lines"],
         "log_tail_name": log_tail["name"],
         "log_tail_truncated": log_tail["truncated"],
@@ -348,6 +383,7 @@ def start_account_login(
         )
         with _WATCH_LOCK:
             _ACTIVE_WATCHERS.add(process.pid)
+            _ACTIVE_JOB_KINDS[process.pid] = "account_login"
     except Exception as exc:
         error = redact_log_line(f"{type(exc).__name__}: {exc}")[:240]
         output.write(f"[account-login] worker launch failed: {error}\n")
@@ -394,11 +430,118 @@ def start_account_login(
     }
 
 
+def start_account_sso_match(text: object) -> dict:
+    values = parse_sso_values(text)
+    if find_managed_processes(ROOT, ("run_until_100.py", "run_batch_headless.py")):
+        return {"ok": False, "error": "registration task is running"}
+    if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
+        return {"ok": False, "error": "account recovery is running"}
+    existing = _workers()
+    if existing:
+        return {"ok": False, "error": "account login task already running", "pid": existing[0]["pid"]}
+    if not SSO_MATCH_WORKER_SCRIPT.is_file():
+        return {"ok": False, "error": f"missing worker script: {SSO_MATCH_WORKER_SCRIPT}"}
+    if not private_accounts():
+        return {"ok": False, "error": "import account credentials before matching SSO"}
+
+    ensure_private_dir(LOG_DIR)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    nonce = secrets.token_hex(4)
+    stem = f"account-login-sso-match-{timestamp}-{nonce}"
+    input_path = LOG_DIR / f".{stem}.input"
+    log_path = LOG_DIR / f"{stem}.log"
+    atomic_write_text(input_path, "\n".join(values) + "\n")
+
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except Exception:
+        input_path.unlink(missing_ok=True)
+        raise
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    output = os.fdopen(fd, "w", encoding="utf-8")
+    command = [
+        _python_command(),
+        "-u",
+        str(SSO_MATCH_WORKER_SCRIPT),
+        "--input-file",
+        str(input_path),
+        "--report-file",
+        str(REPORT_FILE),
+        "--log-file",
+        log_path.name,
+    ]
+    job = {
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "extract_cpa": True,
+    }
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(ROOT),
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+        with _WATCH_LOCK:
+            _ACTIVE_WATCHERS.add(process.pid)
+            _ACTIVE_JOB_KINDS[process.pid] = "sso_match"
+    except Exception as exc:
+        input_path.unlink(missing_ok=True)
+        error = redact_log_line(f"{type(exc).__name__}: {exc}")[:240]
+        output.write(f"[account-sso-match] worker launch failed: {error}\n")
+        output.flush()
+        atomic_write_json(
+            REPORT_FILE,
+            {
+                "ok": False,
+                "job_kind": "sso_match",
+                "started_at": job["created_at"],
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "input_count": len(values),
+                "matched_count": 0,
+                "unusable_count": 0,
+                "unmatched_count": 0,
+                "cpa_success_count": 0,
+                "sso_only_count": 0,
+                "failure_count": len(values),
+                "cancelled_count": 0,
+                "fatal_error": error,
+                "log": log_path.name,
+            },
+        )
+        raise
+    finally:
+        output.close()
+
+    write_pid_file(PID_FILE, process.pid)
+    threading.Thread(
+        target=_watch_worker,
+        args=(process, [], job, log_path, input_path),
+        name=f"account-sso-match-watch-{process.pid}",
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "running": True,
+        "job_kind": "sso_match",
+        "pid": process.pid,
+        "input_count": len(values),
+        "log": log_path.name,
+    }
+
+
 def stop_account_login() -> dict:
     workers = _workers()
     with _WATCH_LOCK:
         _INTENTIONAL_STOPS.update(int(item["pid"]) for item in workers)
-    killed = terminate_managed_processes(ROOT, ("account_login_worker.py",))
+    killed = terminate_managed_processes(
+        ROOT,
+        ("account_login_worker.py", "account_sso_match_worker.py"),
+    )
     reset_incomplete_accounts()
     return {"ok": True, "killed": killed, "status": account_login_status()}
 

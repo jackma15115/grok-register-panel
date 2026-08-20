@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from secure_files import atomic_write_json, exclusive_file_lock
+    from secure_files import atomic_write_json, atomic_write_text, exclusive_file_lock
     from webui.security_utils import redact_log_line
 except ImportError:  # running from webui/
     import sys
@@ -20,7 +20,7 @@ except ImportError:  # running from webui/
     ROOT = Path(__file__).resolve().parent.parent
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from secure_files import atomic_write_json, exclusive_file_lock
+    from secure_files import atomic_write_json, atomic_write_text, exclusive_file_lock
     from security_utils import redact_log_line  # type: ignore
 
 
@@ -32,9 +32,11 @@ STATE_PATH = Path(
     )
 )
 LOCK_PATH = STATE_PATH.with_suffix(STATE_PATH.suffix + ".lock")
+ACCOUNT_FILES_DIR = ROOT / "accounts"
 
 MAX_EMAIL_LENGTH = 254
 MAX_PASSWORD_LENGTH = 1024
+MAX_SSO_LENGTH = 16 * 1024
 ALLOWED_STATUSES = {
     "pending",
     "queued",
@@ -83,7 +85,43 @@ def _normalize_password(value: object) -> str:
     return password
 
 
-def _parse_csv_with_header(lines: list[str]) -> list[tuple[str, str]] | None:
+def normalize_sso(value: object, *, required: bool = False) -> str:
+    sso = str(value or "").strip()
+    if sso.lower().startswith("sso="):
+        sso = sso[4:].strip()
+    if not sso:
+        if required:
+            raise AccountImportError("SSO is empty")
+        return ""
+    if len(sso) > MAX_SSO_LENGTH:
+        raise AccountImportError("SSO is too long")
+    if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in sso):
+        raise AccountImportError("SSO contains unsupported whitespace or control characters")
+    return sso
+
+
+def parse_sso_values(text: object) -> list[str]:
+    lines = [
+        line.strip()
+        for line in str(text or "").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not lines:
+        raise AccountImportError("no SSO values found")
+    values: list[str] = []
+    seen: set[str] = set()
+    for index, line in enumerate(lines, 1):
+        try:
+            sso = normalize_sso(line, required=True)
+        except AccountImportError as exc:
+            raise AccountImportError(f"row {index}: {exc}") from exc
+        if sso not in seen:
+            seen.add(sso)
+            values.append(sso)
+    return values
+
+
+def _parse_csv_with_header(lines: list[str]) -> list[tuple[str, str, str]] | None:
     if not lines or "," not in lines[0]:
         return None
     rows = list(csv.reader(io.StringIO("\n".join(lines))))
@@ -100,17 +138,19 @@ def _parse_csv_with_header(lines: list[str]) -> list[tuple[str, str]] | None:
     )
     if password_index is None:
         return None
+    sso_index = header.index("sso") if "sso" in header else None
     parsed = []
     for row in rows[1:]:
         if not row or not any(str(value or "").strip() for value in row):
             continue
         if max(email_index, password_index) >= len(row):
             raise AccountImportError("CSV row is missing email or password")
-        parsed.append((row[email_index], row[password_index]))
+        sso = row[sso_index] if sso_index is not None and sso_index < len(row) else ""
+        parsed.append((row[email_index], row[password_index], sso))
     return parsed
 
 
-def parse_account_credentials(text: object) -> list[tuple[str, str]]:
+def parse_account_credentials(text: object) -> list[tuple[str, str, str]]:
     raw = str(text or "")
     lines = [line for line in raw.splitlines() if line.strip() and not line.lstrip().startswith("#")]
     if not lines:
@@ -122,29 +162,42 @@ def parse_account_credentials(text: object) -> list[tuple[str, str]]:
         for line_number, line in enumerate(lines, 1):
             value = line.strip()
             if "----" in value:
-                email, password = value.split("----", 1)
+                parts = value.split("----", 2)
+                if len(parts) not in (2, 3):
+                    raise AccountImportError(
+                        f"line {line_number}: expected email----password[----sso]"
+                    )
+                email, password = parts[:2]
+                sso = parts[2] if len(parts) == 3 else ""
             elif "\t" in value:
-                email, password = value.split("\t", 1)
+                parts = value.split("\t", 2)
+                email, password = parts[:2]
+                sso = parts[2] if len(parts) == 3 else ""
             elif "," in value:
                 row = next(csv.reader([value]))
-                if len(row) != 2:
-                    raise AccountImportError(f"line {line_number}: expected email,password")
-                email, password = row
+                if len(row) not in (2, 3):
+                    raise AccountImportError(
+                        f"line {line_number}: expected email,password[,sso]"
+                    )
+                email, password = row[:2]
+                sso = row[2] if len(row) == 3 else ""
             elif ":" in value:
                 email, password = value.split(":", 1)
+                sso = ""
             else:
                 raise AccountImportError(f"line {line_number}: unsupported account format")
-            candidates.append((email, password))
+            candidates.append((email, password, sso))
 
-    deduplicated: dict[str, str] = {}
-    for index, (email_value, password_value) in enumerate(candidates, 1):
+    deduplicated: dict[str, tuple[str, str]] = {}
+    for index, (email_value, password_value, sso_value) in enumerate(candidates, 1):
         try:
             email = _normalize_email(email_value)
             password = _normalize_password(password_value)
+            sso = normalize_sso(sso_value)
         except AccountImportError as exc:
             raise AccountImportError(f"row {index}: {exc}") from exc
-        deduplicated[email] = password
-    result = list(deduplicated.items())
+        deduplicated[email] = (password, sso)
+    result = [(email, password, sso) for email, (password, sso) in deduplicated.items()]
     if not result:
         raise AccountImportError("no account credentials found")
     return result
@@ -162,6 +215,10 @@ def _normalize_item(raw: object) -> dict | None:
         password = _normalize_password(raw.get("password"))
     except AccountImportError:
         return None
+    try:
+        sso = normalize_sso(raw.get("sso"))
+    except AccountImportError:
+        sso = ""
     status = str(raw.get("status") or "pending").strip().lower()
     if status not in ALLOWED_STATUSES:
         status = "pending"
@@ -171,7 +228,7 @@ def _normalize_item(raw: object) -> dict | None:
         "email": email,
         "password": password,
         "status": status,
-        "sso": str(raw.get("sso") or "").strip(),
+        "sso": sso,
         "cpa_ok": bool(raw.get("cpa_ok")),
         "last_error": _clean_text(raw.get("last_error")),
         "created_at": created_at,
@@ -207,6 +264,14 @@ def _read_unlocked() -> dict:
 def _write_unlocked(state: dict) -> None:
     state["updated_at"] = _utc_now()
     atomic_write_json(STATE_PATH, _normalize_state(state))
+
+
+def _write_account_file(email: str, password: str, sso: str) -> None:
+    safe_email = email.replace("/", "_").replace("\\", "_")
+    atomic_write_text(
+        ACCOUNT_FILES_DIR / f"{safe_email}.txt",
+        f"{email}----{password}----{sso}\n",
+    )
 
 
 def _public_item(item: dict) -> dict:
@@ -259,7 +324,8 @@ def import_account_credentials(text: object) -> dict:
         added = 0
         updated = 0
         unchanged = 0
-        for email, password in records:
+        sso_imported = sum(1 for _email, _password, sso in records if sso)
+        for email, password, sso in records:
             item_id = _account_id(email)
             existing = by_email.get(email)
             if existing is None:
@@ -267,8 +333,8 @@ def import_account_credentials(text: object) -> dict:
                     "id": item_id,
                     "email": email,
                     "password": password,
-                    "status": "pending",
-                    "sso": "",
+                    "status": "sso_only" if sso else "pending",
+                    "sso": sso,
                     "cpa_ok": False,
                     "last_error": "",
                     "created_at": now,
@@ -276,12 +342,13 @@ def import_account_credentials(text: object) -> dict:
                     "last_login_at": "",
                 }
                 added += 1
-            elif existing["password"] != password:
+            elif existing["password"] != password or (sso and existing["sso"] != sso):
+                next_sso = sso if sso else ("" if existing["password"] != password else existing["sso"])
                 existing.update(
                     {
                         "password": password,
-                        "status": "pending",
-                        "sso": "",
+                        "status": "sso_only" if next_sso else "pending",
+                        "sso": next_sso,
                         "cpa_ok": False,
                         "last_error": "",
                         "updated_at": now,
@@ -292,13 +359,50 @@ def import_account_credentials(text: object) -> dict:
                 unchanged += 1
         state["items"] = list(by_email.values())
         _write_unlocked(state)
+        for email, password, sso in records:
+            if sso:
+                _write_account_file(email, password, sso)
     return {
         "ok": True,
         "input_count": len(records),
         "added": added,
         "updated": updated,
         "unchanged": unchanged,
+        "sso_imported": sso_imported,
     }
+
+
+def attach_sso_by_email(
+    email: object,
+    sso: object,
+    *,
+    cpa_ok: bool = False,
+    last_error: object = "",
+) -> dict | None:
+    normalized_email = _normalize_email(email)
+    normalized_sso = normalize_sso(sso, required=True)
+    now = _utc_now()
+    with exclusive_file_lock(LOCK_PATH):
+        state = _read_unlocked()
+        found = None
+        for item in state["items"]:
+            if item["email"] != normalized_email:
+                continue
+            item.update(
+                {
+                    "sso": normalized_sso,
+                    "cpa_ok": bool(cpa_ok),
+                    "status": "success" if cpa_ok else "sso_only",
+                    "last_error": _clean_text(last_error),
+                    "updated_at": now,
+                }
+            )
+            found = dict(item)
+            break
+        if found is None:
+            return None
+        _write_unlocked(state)
+    return found
 
 
 def private_accounts(

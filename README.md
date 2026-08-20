@@ -439,7 +439,7 @@ python grok_register_ttk.py
 - **扫描全部账号**：扫描 `accounts/*.txt` 并对缺失 CPA 的记录执行转换，不删除原账号文件
 - 补录记录有邮箱时按邮箱（忽略大小写）去重，无邮箱时按 SSO 去重；同邮箱补录成功后会清理队列中的全部重复快照
 - **导出 SSO**：汇总账号文件与 `sso_pending.txt`，去重后每行导出一个 SSO；明确排除 `sso_risk_rejected.txt`
-- **导出账号 CSV**：导出 `email,passwd` 两列，使用 UTF-8 BOM 和标准 CSV 转义，便于表格软件直接打开
+- **导出账号 CSV**：导出 `email,passwd,sso` 三列；每行按邮箱直接关联密码与 SSO，不依赖另一份导出的行号顺序。文件使用 UTF-8 BOM 和标准 CSV 转义，便于表格软件直接打开
 - **导出 CPA / Grok2API 凭证**：分别将配置目录中的 `xai-*.json` 或 `g2a-*.json` 打包为 ZIP；不会混入其它 JSON、日志或队列文件
 - 四个导出接口始终要求匹配 `MONITOR_TOKEN`，即使普通读取接口允许匿名也不会放宽
 - 补录运行在独立子进程，面板可查看数量、上次结果和停止任务
@@ -455,9 +455,10 @@ python sso_to_auth_json.py \
 
 ### 导入账号管理
 
-- 支持 `email----password`、`email,password`、`email:password` 和 Tab 分隔；CSV 可使用 `email,password` 或 `email,passwd` 表头。单次导入不设账号条数上限，仅受 `MONITOR_MAX_REQUEST_BODY` 请求体大小控制
+- 支持 `email----password` 和 `email----password----sso`，逗号或 Tab 分隔也可带可选第三列；CSV 可使用 `email,password,sso` 或 `email,passwd,sso` 表头。冒号格式仍用于 `email:password`。单次导入不设账号条数上限，仅受 `MONITOR_MAX_REQUEST_BODY` 请求体大小控制
 - 导入时按邮箱去重；同邮箱密码变化会清除旧 SSO / CPA 状态并重新进入待处理
-- “登录选中”只处理勾选账号；“登录 SSO 缺失”只处理未提取 SSO 的账号；“补录 CPA 缺失”只处理已有 SSO 但尚未写入 CPA 的账号
+- 单独粘贴旧 SSO 后可启动“校验可用 SSO”：可换取 OAuth token 的 SSO 按 token 邮箱匹配已导入库存，并保留库存密码；无法换 token 的 SSO 会被淘汰且不会写回待处理文件，未匹配邮箱不会创建缺密码账号
+- 校验后仍显示 SSO 缺失的账号就是需要刷新凭证的集合；“重新登录 SSO 缺失”会逐个登录并获取新 SSO。“登录选中”只处理勾选账号，“补录 CPA 缺失”只处理已有 SSO 但尚未写入 CPA 的账号
 - 每个账号启动独立 Camoufox 会话，沿用面板健康代理池；登录成功写入 `accounts/{email}.txt` 的 `email----password----sso` 标准格式
 - 开启“提取 CPA / Grok2API”后调用现有 SSO 转换配置；转换失败时保留 SSO，并显示为“SSO 已提取”供后续重试
 - 账号登录、批量注册和账号补录互斥，避免并发争用浏览器与 auth 输出

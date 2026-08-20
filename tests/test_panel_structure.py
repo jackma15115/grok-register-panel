@@ -289,6 +289,8 @@ def test_imported_account_login_panel_structure():
     html = mon.split('HTML = r"""', 1)[1].split('"""', 1)[0]
     assert 'id="account-login-title"' in html
     assert 'id="account-login-input"' in html
+    assert 'id="account-sso-match-input"' in html
+    assert 'id="account-sso-match-start"' in html
     assert 'id="account-login-concurrency"' in html
     assert 'id="account-login-cpa"' in html
     assert 'id="account-login-select-all"' in html
@@ -296,6 +298,8 @@ def test_imported_account_login_panel_structure():
     assert 'id="account-login-start-pending"' in html
     assert 'id="account-login-start-cpa-missing"' in html
     assert "startAccountLogin('sso_missing')" in html
+    assert '重新登录 SSO 缺失' in html
+    assert '校验可用 SSO' in html
     assert "startAccountLogin('cpa_missing')" in html
     assert 'id="account-login-stop"' in html
     assert 'id="account-login-body"' in html
@@ -303,9 +307,11 @@ def test_imported_account_login_panel_structure():
     assert 'id="account-login-log-name"' in html
     assert 'function refreshAccountLogin(' in mon
     assert 'function importAccountLoginInput(' in mon
+    assert 'function startAccountSsoMatch(' in mon
     assert 'function startAccountLogin(' in mon
     assert 'function toggleAccountLoginSelectAll(' in mon
     assert '/api/account-login/import' in mon
+    assert '/api/account-login/match-sso' in mon
     assert '/api/account-login/start' in mon
     assert '/api/account-login/stop' in mon
     assert '/api/account-login/delete' in mon

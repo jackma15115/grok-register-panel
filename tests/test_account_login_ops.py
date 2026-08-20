@@ -225,6 +225,66 @@ def test_latest_log_tail_is_bounded_and_redacted():
     assert sso not in text
 
 
+def test_start_sso_match_uses_private_input_path_without_secret_arguments():
+    with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp)
+        worker_script = base / "account_sso_match_worker.py"
+        worker_script.write_text("# test worker\n", encoding="utf-8")
+        previous = (
+            ops.LOG_DIR,
+            ops.SSO_MATCH_WORKER_SCRIPT,
+            ops.REPORT_FILE,
+            ops.PID_FILE,
+            ops.VENV_PY,
+        )
+        ops.LOG_DIR = base / "log"
+        ops.SSO_MATCH_WORKER_SCRIPT = worker_script
+        ops.REPORT_FILE = ops.LOG_DIR / "account_login_report.json"
+        ops.PID_FILE = ops.LOG_DIR / "account_login.pid"
+        ops.VENV_PY = base / ".venv" / "bin" / "python"
+        raw_sso = "s" * 80
+        popen_calls = []
+        fake_thread = SimpleNamespace(start=lambda: None)
+        record = {
+            "id": "e" * 20,
+            "email": "person@example.test",
+            "password": "private-password",
+            "sso": "",
+        }
+        try:
+            with patch.object(ops, "find_managed_processes", return_value=[]), patch.object(
+                ops, "private_accounts", return_value=[record]
+            ), patch.object(
+                ops.subprocess,
+                "Popen",
+                side_effect=lambda command, **kwargs: popen_calls.append((command, kwargs))
+                or SimpleNamespace(pid=6543),
+            ), patch.object(ops.threading, "Thread", return_value=fake_thread):
+                result = ops.start_account_sso_match(raw_sso)
+
+            assert result["ok"] is True
+            assert result["job_kind"] == "sso_match"
+            encoded_result = json.dumps(result)
+            assert raw_sso not in encoded_result
+            assert "private-password" not in encoded_result
+            command = popen_calls[0][0]
+            assert raw_sso not in json.dumps(command)
+            input_path = Path(command[command.index("--input-file") + 1])
+            assert input_path.read_text(encoding="utf-8") == raw_sso + "\n"
+            input_path.unlink()
+        finally:
+            with ops._WATCH_LOCK:
+                ops._ACTIVE_WATCHERS.discard(6543)
+                ops._ACTIVE_JOB_KINDS.pop(6543, None)
+            (
+                ops.LOG_DIR,
+                ops.SSO_MATCH_WORKER_SCRIPT,
+                ops.REPORT_FILE,
+                ops.PID_FILE,
+                ops.VENV_PY,
+            ) = previous
+
+
 if __name__ == "__main__":
     test_start_rejects_registration_or_recovery_conflicts()
     test_start_writes_id_only_job_and_launches_worker()
@@ -232,4 +292,5 @@ if __name__ == "__main__":
     test_status_does_not_overwrite_error_while_watcher_is_finishing()
     test_worker_exit_label_identifies_linux_oom_signal()
     test_latest_log_tail_is_bounded_and_redacted()
+    test_start_sso_match_uses_private_input_path_without_secret_arguments()
     print("OK account login ops")
