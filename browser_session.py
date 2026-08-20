@@ -22,9 +22,16 @@ from urllib.parse import urlparse
 def _pin_playwright_node(platform_name: Optional[str] = None) -> None:
     """Playwright 1.60 自带 Node 24，管道对端关闭时 Unhandled EPIPE 会拖死整批。
 
-    优先走本仓库 scripts/playwright-node（系统 Node 22 + EPIPE guard）。
-    必须在 import playwright / camoufox 之前设置 PLAYWRIGHT_NODEJS_PATH。
+    POSIX 优先 scripts/playwright-node；Windows 使用 node.exe + NODE_OPTIONS 注入
+    EPIPE guard，避免把 bash 包装脚本交给 CreateProcess。
+    必须在 import playwright / camoufox 之前设置。
     """
+    if platform_name is None:
+        from runtime_platform import apply_playwright_node_env
+
+        apply_playwright_node_env()
+        return
+
     wrapper = Path(__file__).resolve().parent / "scripts" / "playwright-node"
     current = str(os.environ.get("PLAYWRIGHT_NODEJS_PATH") or "").strip()
     system = str(platform_name or os.name).strip().lower()
@@ -66,6 +73,7 @@ def _pin_playwright_node(platform_name: Optional[str] = None) -> None:
     else:
         # Let Playwright use its bundled driver when no system Node is present.
         os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
+        return
 
 
 _pin_playwright_node()

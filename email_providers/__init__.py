@@ -8,4 +8,5 @@
 - moemail: MoeMail OpenAPI
 - ti-temp-mail: TI Temp Mail
 - outlook_rt: 本地 Outlook MSA refresh_token 库存（jsonl）
+- inbucket: Inbucket 自托管临时邮箱
 """

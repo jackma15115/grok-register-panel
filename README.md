@@ -22,7 +22,7 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 能力 | 说明 |
 |------|------|
 | 注册全链路 | 邮箱 OTP → 资料页 → Turnstile → SSO → Device / OAuth → 写入 CPA / Grok2API |
-| 多邮箱后端 | Cloudflare Worker 邮、DuckMail、YYDS、MailNest、CloudMail、MoeMail；面板内切换、保存和连通性测试 |
+| 多邮箱后端 | Cloudflare Worker 邮、DuckMail、YYDS、MailNest、CloudMail、MoeMail、Inbucket 自建；面板内切换、保存和连通性测试 |
 | 反检测浏览器 | [Camoufox](https://camoufox.com/)（Gecko 层指纹） |
 | 出口预检 | 启动前解析出口 IP / ASN，命中黑名单直接换口 |
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
@@ -150,7 +150,7 @@ GROK_REGISTER_IMAGE=ghcr.io/jackma15115/grok-register-panel:latest \
 |------|----------|----------------|
 | Linux | 正式支持 | 有显示会话时直启；无显示时面板自动调用 `xvfb-run` |
 | macOS | 正式支持 | 直接使用本机显示会话，不依赖 Xvfb |
-| Windows | 实验性 | 已兼容虚拟环境路径与面板进程启停；浏览器批处理链路仍需自行验证 |
+| Windows | 已本机验证，CI 覆盖 Node/Xvfb 解析 | 不依赖 Xvfb；面板直启 `.venv\Scripts\python.exe`。默认 `GROK_HEADLESS=1`（有头模式设 `GROK_HEADED=1`） |
 
 Linux 容器必须保留 procfs（通常为默认的 `/proc` 挂载），面板依赖它读取并安全停止
 当前项目的任务进程。
@@ -176,13 +176,24 @@ Debian/Ubuntu 无头运行还需要 Tk、Xvfb 和 xauth：
 sudo apt-get install -y libtk8.6 xvfb xauth
 ```
 
+Windows 也可以一条命令完成安装，然后用本机代理 URL（http / socks5）跑批，不必 SSH 到 Linux：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1
+# 编辑 config.json，或在面板导入代理池
+powershell -ExecutionPolicy Bypass -File scripts\run_windows_batch.ps1 -Count 1 -Workers 1
+powershell -ExecutionPolicy Bypass -File scripts\run_windows_panel.ps1
+```
+
+Windows 不要把 `PLAYWRIGHT_NODEJS_PATH` 指到 `scripts/playwright-node`（那是 bash 包装）。运行时会解析 `node.exe` 或 Playwright 自带 Node，并用带引号的 `NODE_OPTIONS --require` 注入 EPIPE 保护。代理请写 **Windows 本机可达** 的 URL（例如 `socks5://user:pass@gate.example:1000`），不要沿用 Linux 上的 `127.0.0.1:82xx` mixed 口。
+
 > `pip install` 只装 Python 依赖；**不执行 `camoufox fetch` 无法启动浏览器**。
 
 ### 配置（`config.json`）
 
 | 字段 | 说明 |
 |------|------|
-| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` / `outlook_rt` |
+| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` / `outlook_rt` / `inbucket` |
 | `outlook_rt_inventory` | Outlook MSA 库存路径（jsonl：`email`+`refresh_token`；或 `email----rt`） |
 | `outlook_rt_used_path` | 已用邮箱记录（可选；默认 `库存路径.used`） |
 | `outlook_rt_client_id` | 可选 Client ID；默认 Microsoft Authentication Broker 公共客户端 |
@@ -197,8 +208,11 @@ sudo apt-get install -y libtk8.6 xvfb xauth
 | `ti_temp_mail_api_key` | 可选创建 Token；服务端未设置 `CREATE_TOKEN` 时留空 |
 | `ti_temp_mail_domain` | 可选域名池，多个域名用逗号或分号分隔；留空时由服务端选择 |
 | `ti_temp_mail_mode` | `maindomain`（主域名）或 `subdomain`（泛域名子域名） |
-| `proxy` | 可选的旧版默认 HTTP 代理；留空时直连 |
-| `proxies.txt` | 可选的旧版多行代理文件；未启用面板代理状态文件时继续兼容 |
+| `inbucket_api_base` | Inbucket 自建实例根 URL，例如 `http://127.0.0.1:9000`（可用 `INBUCKET_API_BASE` 环境变量） |
+| `inbucket_domain` | Inbucket 收信根域名，可逗号分隔多个轮换，例如 `mail.example.com, box.example.net` |
+| `inbucket_random_levels` | 随机子域级数：`0` 关闭 / `1` / `2` / `1-2` / `1-3`（在区间内随机取级数）；启用需泛解析收信（`*.根域名` 的 MX 指向实例） |
+| `proxy` | 默认 HTTP 代理，如 `http://127.0.0.1:7890` |
+| `proxies.txt` | 可选的旧版多行代理文件；未配置面板代理池时继续兼容 |
 | `register_workers` | 并发浏览器数（建议先 2～3） |
 | `register_count` | 单次目标成功数；失败重试不占用成功名额 |
 | `cpa_auto_add` | 是否 SSO→OAuth 并写入 auth |
@@ -384,7 +398,9 @@ python grok_register_ttk.py
 - TI Temp Mail 支持可选创建 Token、`maindomain` / `subdomain` 模式和多域名随机选择；创建 Token 与邮箱访问 Token 分开使用
 - 邮箱服务页显示脱敏后的 TI Temp Mail 收件日志；该区域不依赖 `PANEL_INCLUDE_TAIL`，也不会展示邮箱访问 Token
 - 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`、`ti-temp-mail`、`outlook_rt`
+- 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`、`outlook_rt`、`inbucket`
 - `outlook_rt` 从本地 jsonl 库存取号（非购买），用 MSA `refresh_token` 刷 Graph 收 xAI 验证码
+- `inbucket` 使用自建 [Inbucket](https://github.com/inbucket/inbucket) 实例：填实例地址和收信根域名即可，邮箱即建即用，无需注册 API；根域名可配多个轮换，并可按 `inbucket_random_levels` 叠加随机多级子域（需泛解析收信）
 - 切换服务商时只显示该服务实际支持的字段；保存后新的注册任务读取 `config.json`
 - 已保存的 API Key、JWT 和密码不会通过接口或页面回显；密钥输入留空会保留原值，必须点“清除”并保存才会删除
 - “测试当前提供商”使用表单中的未保存内容做连通性检查，不会改写 `config.json`；`outlook_rt` 刷新成功时会原子保存上游轮换后的 RT，避免库存保留已失效凭据，但不会标记邮箱已用
@@ -593,7 +609,7 @@ A: 8787 被其它进程占用（例如同机其它服务）。换 `MONITOR_PORT`
 A: 旧版面板直接读取 Linux `/proc`，macOS 上必然失败；更新后面板改用 `psutil`。若新版仍在 Linux 容器中提示无法读取进程列表，说明容器没有挂载 procfs，请恢复默认 `/proc` 挂载后重启面板。不要用“忽略进程检测”绕过，否则可能重复启动任务。
 
 **Q: Windows？**  
-A: 面板已适配 `.venv\\Scripts\\python.exe`、进程发现和停止；Camoufox 浏览器批处理链路仍标为实验性。生产使用优先 Linux 或 macOS。
+A: 已本机验证，CI 覆盖 Node/Xvfb 解析。不依赖 Xvfb；用 `scripts\setup_windows.ps1` 安装，`scripts\run_windows_batch.ps1` 跑批。默认 `GROK_HEADLESS=1`。代理必须是本机可达的 HTTP/SOCKS URL，不要沿用 Linux 上的 `127.0.0.1:82xx` mixed 口。详见 `WINDOWS.md`。
 
 **Q: 面板和真实进程不一致？**  
 A: 看 `log/orch100-stdout.log` 与最新 `log/batch-*.log`；欢迎提 issue / PR。
