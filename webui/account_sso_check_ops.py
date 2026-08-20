@@ -236,28 +236,32 @@ def delete_checked_invalid_accounts(ids: object) -> dict:
     requested = {str(value or "").strip() for value in (ids or []) if str(value or "").strip()}
     if not requested:
         raise ValueError("no invalid account ids selected")
+    current = {item["id"]: item for item in private_account_inventory()}
+    if not requested.issubset(current):
+        raise ValueError("one or more selected accounts no longer exist")
+    missing_sso_ids = {
+        account_id for account_id in requested if not str(current[account_id].get("sso") or "").strip()
+    }
+    checked_ids = requested - missing_sso_ids
     report = _read_private_report()
-    if not report.get("finished_at") or report.get("cancelled"):
+    if checked_ids and (not report.get("finished_at") or report.get("cancelled")):
         raise ValueError("the latest SSO check did not complete")
     invalid = {
         str(item.get("id") or ""): item
         for item in report.get("items") or []
         if isinstance(item, dict) and item.get("status") == "invalid"
     }
-    if not requested.issubset(invalid):
-        raise ValueError("one or more accounts are not invalid in the latest completed check")
-    current = {item["id"]: item for item in private_account_inventory()}
-    for account_id in requested:
-        account = current.get(account_id)
-        if account is None:
-            raise ValueError("one or more selected accounts no longer exist")
+    if not checked_ids.issubset(invalid):
+        raise ValueError("selected accounts with SSO must be invalid in the latest completed check")
+    for account_id in checked_ids:
+        account = current[account_id]
         if _fingerprint(account.get("sso")) != str(invalid[account_id].get("sso_fingerprint") or ""):
             raise ValueError("one or more selected accounts changed after the SSO check")
     result = delete_account_resources(
         sorted(requested),
         expected_sso_fingerprints={
             account_id: str(invalid[account_id].get("sso_fingerprint") or "")
-            for account_id in requested
+            for account_id in checked_ids
         },
     )
     result["remote_cpa_not_deleted"] = _remote_cpa_configured()

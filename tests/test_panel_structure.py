@@ -293,6 +293,8 @@ def test_imported_account_login_panel_structure():
     assert 'id="account-sso-match-start"' in html
     assert 'id="account-sso-check-start"' in html
     assert 'id="account-sso-delete-invalid"' in html
+    assert '选择失效 / 无 SSO' in html
+    assert 'id="account-login-source-filter"' in html
     assert 'id="account-login-concurrency"' in html
     assert 'id="account-login-cpa"' in html
     assert 'id="account-login-select-all"' in html
@@ -312,6 +314,7 @@ def test_imported_account_login_panel_structure():
     assert 'function startAccountSsoMatch(' in mon
     assert 'function startAccountLogin(' in mon
     assert 'function toggleAccountLoginSelectAll(' in mon
+    assert 'function changeAccountLoginSourceFilter(' in mon
     assert '/api/account-login/import' in mon
     assert '/api/account-login/match-sso' in mon
     assert '/api/account-login/sso-check' in mon

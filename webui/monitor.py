@@ -1401,6 +1401,9 @@ HTML = r"""<!DOCTYPE html>
   .inline-check input, input.account-select { width: 16px; min-height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
   .account-login-actions { justify-content: flex-start; }
   .account-login-summary { margin-top: 14px; }
+  .account-login-filter { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .account-login-filter label { color: var(--muted); font-size: 11px; }
+  .account-login-filter select { min-width: 150px; min-height: 34px; }
   .account-login-table-wrap { max-height: 360px; margin-top: 12px; overflow: auto; border: 1px solid var(--border); background: var(--surface-soft); }
   .account-login-table { min-width: 820px; }
   .account-login-table th:first-child, .account-login-table td:first-child { width: 42px; text-align: center; }
@@ -2552,7 +2555,7 @@ HTML = r"""<!DOCTYPE html>
           <button id="account-login-start-pending" onclick="startAccountLogin('sso_missing')">重新登录 SSO 缺失</button>
           <button id="account-login-start-cpa-missing" onclick="startAccountLogin('cpa_missing')">补录 CPA 缺失</button>
           <button class="primary" id="account-sso-check-start" onclick="startAccountSsoCheck()">检测全部 SSO</button>
-          <button id="account-sso-select-invalid" onclick="selectInvalidAccounts()">选择失效账号</button>
+          <button id="account-sso-select-invalid" onclick="selectInvalidAccounts()">选择失效 / 无 SSO</button>
           <button class="danger" id="account-login-stop" onclick="stopAccountLogin()">停止</button>
           <button class="danger" id="account-login-delete" onclick="deleteAccountLoginSelected()">删除选中</button>
           <button class="danger" id="account-sso-delete-invalid" onclick="deleteInvalidAccounts()">清理选中失效账号</button>
@@ -2571,6 +2574,16 @@ HTML = r"""<!DOCTYPE html>
     </div>
     <div class="chips account-login-summary" id="account-login-kpis"></div>
     <div class="msg" id="account-login-msg" role="status" aria-live="polite"></div>
+    <div class="account-login-filter">
+      <label for="account-login-source-filter">来源</label>
+      <select id="account-login-source-filter" onchange="changeAccountLoginSourceFilter(this.value)">
+        <option value="all">全部来源</option>
+        <option value="imported">手动导入</option>
+        <option value="registered">任务注册</option>
+        <option value="both">导入 + 注册</option>
+      </select>
+      <span class="section-meta mono" id="account-login-filter-count">--</span>
+    </div>
     <div class="account-login-table-wrap">
       <table class="account-login-table">
         <thead><tr><th>选择</th><th>邮箱</th><th>来源</th><th>状态</th><th>SSO</th><th>本地 Auth</th><th>SSO 检测</th><th>最近结果</th><th>更新时间</th></tr></thead>
@@ -2706,6 +2719,7 @@ let domainData = null;
 let emailProviderData = null;
 let accountLoginData = null;
 const selectedAccountLoginIds = new Set();
+let accountLoginSourceFilter = "all";
 let selectedEmailProvider = "";
 const clearedEmailSecrets = new Set();
 const THEME_KEY = "GROK_REGISTER_THEME";
@@ -3507,10 +3521,22 @@ function toggleAccountLoginSelection(id, checked) {
   renderAccountLogin(accountLoginData || {});
 }
 function selectedAccountLoginList() {
-  return Array.from(selectedAccountLoginIds);
+  const visibleIds = new Set(visibleAccountLoginItems().map(item => item.id));
+  return Array.from(selectedAccountLoginIds).filter(id => visibleIds.has(id));
+}
+function visibleAccountLoginItems() {
+  const items = (accountLoginData && accountLoginData.items) || [];
+  return accountLoginSourceFilter === "all"
+    ? items
+    : items.filter(item => item.source === accountLoginSourceFilter);
+}
+function changeAccountLoginSourceFilter(value) {
+  accountLoginSourceFilter = ["all", "imported", "registered", "both"].includes(value) ? value : "all";
+  selectedAccountLoginIds.clear();
+  renderAccountLogin(accountLoginData || {});
 }
 function toggleAccountLoginSelectAll() {
-  const items = (accountLoginData && accountLoginData.items) || [];
+  const items = visibleAccountLoginItems();
   const allSelected = items.length > 0 && items.every(item => selectedAccountLoginIds.has(item.id));
   if (allSelected) {
     items.forEach(item => selectedAccountLoginIds.delete(item.id));
@@ -3520,9 +3546,9 @@ function toggleAccountLoginSelectAll() {
   renderAccountLogin(accountLoginData || {});
 }
 function selectInvalidAccounts() {
-  const items = (accountLoginData && accountLoginData.items) || [];
+  const items = visibleAccountLoginItems();
   selectedAccountLoginIds.clear();
-  items.filter(item => item.sso_check_status === "invalid").forEach(item => selectedAccountLoginIds.add(item.id));
+  items.filter(item => item.sso_check_status === "invalid" || !item.has_sso).forEach(item => selectedAccountLoginIds.add(item.id));
   renderAccountLogin(accountLoginData || {});
 }
 function accountSourceLabel(source) {
@@ -3538,8 +3564,9 @@ function accountSsoCheckLabel(item) {
 }
 function renderAccountLogin(data) {
   accountLoginData = data || {};
-  const items = accountLoginData.items || [];
-  const validIds = new Set(items.map(item => item.id));
+  const allItems = accountLoginData.items || [];
+  const items = visibleAccountLoginItems();
+  const validIds = new Set(allItems.map(item => item.id));
   Array.from(selectedAccountLoginIds).forEach(id => { if (!validIds.has(id)) selectedAccountLoginIds.delete(id); });
   const summary = accountLoginData.summary || {};
   document.getElementById("account-login-kpis").innerHTML = [
@@ -3553,6 +3580,8 @@ function renderAccountLogin(data) {
     ["SSO 失效", summary.sso_invalid ?? 0, (summary.sso_invalid || 0) > 0 ? "fail" : ""],
     ["失败", summary.failed ?? 0, (summary.failed || 0) > 0 ? "fail" : ""],
   ].map(([label, value, cls]) => `<div class="chip"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
+  document.getElementById("account-login-source-filter").value = accountLoginSourceFilter;
+  document.getElementById("account-login-filter-count").textContent = `${items.length} / ${allItems.length}`;
   const lastReport = accountLoginData.last_report || {};
   const ssoCheck = accountLoginData.sso_check || {};
   const statusText = accountLoginData.running
@@ -3590,7 +3619,7 @@ function renderAccountLogin(data) {
   }
   document.getElementById("account-login-log-name").textContent = accountLoginData.log_tail_name || "暂无日志";
   const running = !!accountLoginData.running;
-  const selected = selectedAccountLoginIds.size;
+  const selected = Array.from(selectedAccountLoginIds).filter(id => items.some(item => item.id === id)).length;
   const allSelected = items.length > 0 && items.every(item => selectedAccountLoginIds.has(item.id));
   document.getElementById("account-login-import").disabled = running;
   document.getElementById("account-login-input").disabled = running;
@@ -3602,11 +3631,12 @@ function renderAccountLogin(data) {
   document.getElementById("account-login-start-pending").disabled = running || !(summary.sso_missing > 0);
   document.getElementById("account-login-start-cpa-missing").disabled = running || !(summary.cpa_missing > 0);
   document.getElementById("account-sso-check-start").disabled = running || items.length === 0;
-  document.getElementById("account-sso-select-invalid").disabled = !(summary.sso_invalid > 0);
+  const cleanupEligible = items.filter(item => item.sso_check_status === "invalid" || !item.has_sso);
+  document.getElementById("account-sso-select-invalid").disabled = cleanupEligible.length === 0;
   document.getElementById("account-login-stop").disabled = !running;
   const selectedImported = items.filter(item => selectedAccountLoginIds.has(item.id) && item.login_eligible !== false).length;
   document.getElementById("account-login-delete").disabled = running || selected === 0 || selectedImported !== selected;
-  const selectedInvalid = items.filter(item => selectedAccountLoginIds.has(item.id) && item.sso_check_status === "invalid").length;
+  const selectedInvalid = items.filter(item => selectedAccountLoginIds.has(item.id) && (item.sso_check_status === "invalid" || !item.has_sso)).length;
   document.getElementById("account-sso-delete-invalid").disabled = running || selectedInvalid === 0 || selectedInvalid !== selected;
 }
 async function refreshAccountLogin(authHelp = false) {
@@ -3691,9 +3721,9 @@ async function deleteAccountLoginSelected() {
 async function deleteInvalidAccounts() {
   const items = (accountLoginData && accountLoginData.items) || [];
   const ids = selectedAccountLoginList();
-  const invalid = items.filter(item => ids.includes(item.id) && item.sso_check_status === "invalid");
+  const invalid = items.filter(item => ids.includes(item.id) && (item.sso_check_status === "invalid" || !item.has_sso));
   if (!ids.length || invalid.length !== ids.length) {
-    setMsg("account-login-msg", "只能清理最近一次完整检测中确认失效的账号", "err");
+    setMsg("account-login-msg", "只能清理换令牌失败或没有 SSO 的账号", "err");
     return;
   }
   if (!confirm(`永久清理选中的 ${ids.length} 个失效账号？将删除本地账号文件、账密库存、SSO、CPA 和 Grok2API 数据。`)) return;

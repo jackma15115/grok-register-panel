@@ -112,19 +112,50 @@ def test_delete_resources_removes_local_chain_and_side_queue():
 
 def test_delete_requires_completed_latest_invalid_check():
     with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp)
+        previous_store = store.STATE_PATH, store.LOCK_PATH, store.ACCOUNT_FILES_DIR
         previous = ops.REPORT_FILE
+        store.STATE_PATH = base / "accounts" / "imported_credentials.json"
+        store.LOCK_PATH = base / "accounts" / "imported_credentials.json.lock"
+        store.ACCOUNT_FILES_DIR = base / "accounts"
         ops.REPORT_FILE = Path(temp) / "report.json"
         ops.REPORT_FILE.write_text(json.dumps({"items": []}), encoding="utf-8")
         try:
+            store.import_account_credentials(f"checked@example.test----password----{'s' * 80}")
+            item = store.private_account_inventory()[0]
             with patch.object(ops, "find_managed_processes", return_value=[]):
                 try:
-                    ops.delete_checked_invalid_accounts(["a" * 20])
+                    ops.delete_checked_invalid_accounts([item["id"]])
                 except ValueError as exc:
                     assert "did not complete" in str(exc)
                 else:
                     raise AssertionError("expected incomplete report rejection")
         finally:
+            store.STATE_PATH, store.LOCK_PATH, store.ACCOUNT_FILES_DIR = previous_store
             ops.REPORT_FILE = previous
+
+
+def test_delete_allows_missing_sso_without_a_completed_check():
+    with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp)
+        previous_store = store.STATE_PATH, store.LOCK_PATH, store.ACCOUNT_FILES_DIR
+        previous_report = ops.REPORT_FILE
+        store.STATE_PATH = base / "accounts" / "imported_credentials.json"
+        store.LOCK_PATH = base / "accounts" / "imported_credentials.json.lock"
+        store.ACCOUNT_FILES_DIR = base / "accounts"
+        ops.REPORT_FILE = base / "report.json"
+        ops.REPORT_FILE.write_text(json.dumps({"items": []}), encoding="utf-8")
+        try:
+            store.import_account_credentials("missing@example.test----password")
+            item = store.private_account_inventory()[0]
+            with patch.object(ops, "find_managed_processes", return_value=[]):
+                result = ops.delete_checked_invalid_accounts([item["id"]])
+            assert result["ok"] is True
+            assert result["deleted"] == 1
+            assert not store.private_accounts()
+        finally:
+            store.STATE_PATH, store.LOCK_PATH, store.ACCOUNT_FILES_DIR = previous_store
+            ops.REPORT_FILE = previous_report
 
 
 def test_delete_resources_rechecks_sso_before_removing_data():
@@ -155,5 +186,6 @@ if __name__ == "__main__":
     test_inventory_merges_registered_accounts_and_redacts_secrets()
     test_delete_resources_removes_local_chain_and_side_queue()
     test_delete_requires_completed_latest_invalid_check()
+    test_delete_allows_missing_sso_without_a_completed_check()
     test_delete_resources_rechecks_sso_before_removing_data()
     print("OK account sso check")
