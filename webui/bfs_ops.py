@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import copy
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +29,18 @@ BFS_REPORT = LOG_DIR / "bfs_scan_report.json"
 BFS_EXPORT = LOG_DIR / "bfs_flagged.jsonl"
 BFS_FLAGGED_FILE = ACCOUNTS_DIR / "sso_bfs_flagged.txt"
 CONFIG_FILE = ROOT / "config.json"
+_RESULT_CACHE: tuple[str, tuple, float, dict] | None = None
+_FLAGGED_CACHE: tuple[str, tuple, float, int] | None = None
+_CACHE_LOCK = threading.Lock()
+_CACHE_TTL = 2.0
+
+
+def _file_signature(path: Path) -> tuple:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), False)
+    return (str(path), True, int(stat.st_mtime_ns), int(stat.st_size))
 
 
 def _resolve_auth_dirs() -> list[Path]:
@@ -63,6 +77,26 @@ def _resolve_auth_dirs() -> list[Path]:
 
 
 def _flagged_line_count() -> int:
+    global _FLAGGED_CACHE
+    now = time.monotonic()
+    path_key = str(BFS_FLAGGED_FILE)
+    with _CACHE_LOCK:
+        if (
+            _FLAGGED_CACHE
+            and _FLAGGED_CACHE[0] == path_key
+            and now - _FLAGGED_CACHE[2] < _CACHE_TTL
+        ):
+            return _FLAGGED_CACHE[3]
+    signature = _file_signature(BFS_FLAGGED_FILE)
+    with _CACHE_LOCK:
+        if (
+            _FLAGGED_CACHE
+            and _FLAGGED_CACHE[0] == path_key
+            and _FLAGGED_CACHE[1] == signature
+        ):
+            result = _FLAGGED_CACHE[3]
+            _FLAGGED_CACHE = (path_key, signature, time.monotonic(), result)
+            return result
     try:
         if not BFS_FLAGGED_FILE.is_file():
             return 0
@@ -70,6 +104,8 @@ def _flagged_line_count() -> int:
         for line in BFS_FLAGGED_FILE.read_text(encoding="utf-8").splitlines():
             if line.strip() and not line.strip().startswith("#"):
                 n += 1
+        with _CACHE_LOCK:
+            _FLAGGED_CACHE = (path_key, signature, time.monotonic(), n)
         return n
     except OSError:
         return 0
@@ -77,12 +113,42 @@ def _flagged_line_count() -> int:
 
 def _jsonl_bfs_from_results() -> dict:
     """Summarize bfs fields already written to register_results.jsonl."""
+    global _RESULT_CACHE
     path = LOG_DIR / "register_results.jsonl"
+    now = time.monotonic()
+    path_key = str(path)
+    with _CACHE_LOCK:
+        if (
+            _RESULT_CACHE
+            and _RESULT_CACHE[0] == path_key
+            and now - _RESULT_CACHE[2] < _CACHE_TTL
+        ):
+            return copy.deepcopy(_RESULT_CACHE[3])
+    signature = _file_signature(path)
+    with _CACHE_LOCK:
+        if (
+            _RESULT_CACHE
+            and _RESULT_CACHE[0] == path_key
+            and _RESULT_CACHE[1] == signature
+        ):
+            result = copy.deepcopy(_RESULT_CACHE[3])
+            _RESULT_CACHE = (
+                path_key,
+                signature,
+                time.monotonic(),
+                copy.deepcopy(result),
+            )
+            return result
     out = {"ok": 0, "bfs": 0, "clean": 0, "unknown": 0, "total": 0}
     if not path.is_file():
         return out
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 8 * 1024 * 1024))
+            text = handle.read().decode("utf-8", errors="replace")
+        lines = text.splitlines()
     except OSError:
         return out
     for line in lines[-5000:]:
@@ -104,6 +170,13 @@ def _jsonl_bfs_from_results() -> dict:
             out["clean"] += 1
         else:
             out["unknown"] += 1
+    with _CACHE_LOCK:
+        _RESULT_CACHE = (
+            path_key,
+            signature,
+            time.monotonic(),
+            copy.deepcopy(out),
+        )
     return out
 
 

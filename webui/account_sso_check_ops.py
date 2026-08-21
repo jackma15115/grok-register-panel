@@ -87,9 +87,9 @@ def _public_report(report: dict) -> dict:
     }
 
 
-def sso_check_status() -> dict:
-    workers = _workers()
-    report = _public_report(_read_private_report())
+def sso_check_status(*, workers: list[dict] | None = None, report: dict | None = None) -> dict:
+    workers = _workers() if workers is None else workers
+    report = _public_report(_read_private_report() if report is None else report)
     return {
         **report,
         "running": bool(workers),
@@ -97,9 +97,14 @@ def sso_check_status() -> dict:
     }
 
 
-def sso_check_annotations() -> dict[str, dict]:
-    report = _read_private_report()
-    current = {item["id"]: item for item in private_account_inventory()}
+def sso_check_annotations(
+    *, private_items: list[dict] | None = None, report: dict | None = None
+) -> dict[str, dict]:
+    report = _read_private_report() if report is None else report
+    current = {
+        item["id"]: item
+        for item in (private_items if private_items is not None else private_account_inventory())
+    }
     annotations: dict[str, dict] = {}
     for raw in report.get("items") or []:
         if not isinstance(raw, dict):

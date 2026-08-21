@@ -9,6 +9,9 @@ import json
 import os
 import re
 import sys
+import threading
+import time
+import copy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,6 +66,49 @@ ALLOWED_STATUSES = {
     "cancelled",
 }
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+# Account files are shared with the registration worker.  A short cache keeps
+# the panel responsive while still making newly written accounts visible
+# promptly; all local write paths invalidate it immediately.
+_INVENTORY_CACHE_TTL = 1.5
+_INVENTORY_CACHE_LOCK = threading.Lock()
+_INVENTORY_BUILD_LOCK = threading.Lock()
+_INVENTORY_CACHE: tuple[tuple[str, str, str], tuple, float, list[dict]] | None = None
+
+
+def _invalidate_inventory_cache() -> None:
+    global _INVENTORY_CACHE
+    with _INVENTORY_CACHE_LOCK:
+        _INVENTORY_CACHE = None
+
+
+def _path_signature(path: Path) -> tuple:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), False)
+    return (str(path), True, int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _inventory_signature() -> tuple:
+    account_files = []
+    try:
+        for path in ACCOUNT_FILES_DIR.glob("*.txt"):
+            if path.is_file():
+                account_files.append(_path_signature(path))
+    except OSError:
+        pass
+    config = _read_config()
+    auth_dirs = (
+        _configured_auth_dir("cpa", config),
+        _configured_auth_dir("grok2api", config),
+    )
+    return (
+        _path_signature(STATE_PATH),
+        _path_signature(CONFIG_FILE),
+        tuple(sorted(account_files)),
+        tuple(_path_signature(path) for path in auth_dirs),
+    )
 
 
 class AccountImportError(ValueError):
@@ -285,6 +331,7 @@ def _read_unlocked() -> dict:
 def _write_unlocked(state: dict) -> None:
     state["updated_at"] = _utc_now()
     atomic_write_json(STATE_PATH, _normalize_state(state))
+    _invalidate_inventory_cache()
 
 
 def _write_account_file(email: str, password: str, sso: str) -> None:
@@ -417,35 +464,67 @@ def _registered_accounts() -> dict[str, dict]:
 
 def private_account_inventory() -> list[dict]:
     """Return imported and registered accounts with credentials for local workers."""
-    with exclusive_file_lock(LOCK_PATH):
-        state = _read_unlocked()
-    by_email: dict[str, dict] = {}
-    for item in state["items"]:
-        merged = dict(item)
-        merged["source"] = "imported"
-        by_email[item["email"]] = merged
+    global _INVENTORY_CACHE
+    cache_key = (str(STATE_PATH), str(ACCOUNT_FILES_DIR), str(CONFIG_FILE))
+    now = time.monotonic()
+    with _INVENTORY_CACHE_LOCK:
+        cached = _INVENTORY_CACHE
+        if cached and cached[0] == cache_key and now - cached[2] < _INVENTORY_CACHE_TTL:
+            return copy.deepcopy(cached[3])
 
-    for email, registered in _registered_accounts().items():
-        existing = by_email.get(email)
-        if existing is None:
-            by_email[email] = dict(registered)
-            continue
-        existing["source"] = "both"
-        if not existing.get("password") and registered.get("password"):
-            existing["password"] = registered["password"]
-        if not existing.get("sso") and registered.get("sso"):
-            existing["sso"] = registered["sso"]
-        if not existing.get("updated_at") and registered.get("updated_at"):
-            existing["updated_at"] = registered["updated_at"]
+    # Concurrent panel requests should queue behind one build and then reuse
+    # its result instead of scanning every account file independently.
+    with _INVENTORY_BUILD_LOCK:
+        now = time.monotonic()
+        signature = _inventory_signature()
+        with _INVENTORY_CACHE_LOCK:
+            cached = _INVENTORY_CACHE
+            if cached and cached[0] == cache_key and cached[1] == signature:
+                _INVENTORY_CACHE = (
+                    cache_key,
+                    signature,
+                    time.monotonic(),
+                    cached[3],
+                )
+                return copy.deepcopy(cached[3])
 
-    config = _read_config()
-    for item in by_email.values():
-        cpa_path, g2a_path = _auth_file_paths(item["email"], config)
-        item["cpa_local"] = _is_direct_file(cpa_path)
-        item["grok2api_local"] = _is_direct_file(g2a_path)
-        item["cpa_ok"] = bool(item.get("cpa_ok") or item["cpa_local"])
-        item["login_eligible"] = item.get("source") in {"imported", "both"}
-    return [by_email[email] for email in sorted(by_email)]
+        with exclusive_file_lock(LOCK_PATH):
+            state = _read_unlocked()
+        by_email: dict[str, dict] = {}
+        for item in state["items"]:
+            merged = dict(item)
+            merged["source"] = "imported"
+            by_email[item["email"]] = merged
+
+        for email, registered in _registered_accounts().items():
+            existing = by_email.get(email)
+            if existing is None:
+                by_email[email] = dict(registered)
+                continue
+            existing["source"] = "both"
+            if not existing.get("password") and registered.get("password"):
+                existing["password"] = registered["password"]
+            if not existing.get("sso") and registered.get("sso"):
+                existing["sso"] = registered["sso"]
+            if not existing.get("updated_at") and registered.get("updated_at"):
+                existing["updated_at"] = registered["updated_at"]
+
+        config = _read_config()
+        for item in by_email.values():
+            cpa_path, g2a_path = _auth_file_paths(item["email"], config)
+            item["cpa_local"] = _is_direct_file(cpa_path)
+            item["grok2api_local"] = _is_direct_file(g2a_path)
+            item["cpa_ok"] = bool(item.get("cpa_ok") or item["cpa_local"])
+            item["login_eligible"] = item.get("source") in {"imported", "both"}
+        result = [by_email[email] for email in sorted(by_email)]
+        with _INVENTORY_CACHE_LOCK:
+            _INVENTORY_CACHE = (
+                cache_key,
+                signature,
+                time.monotonic(),
+                copy.deepcopy(result),
+            )
+        return result
 
 
 def _public_item(item: dict) -> dict:
@@ -467,8 +546,8 @@ def _public_item(item: dict) -> dict:
     }
 
 
-def read_account_inventory() -> dict:
-    private_items = private_account_inventory()
+def read_account_inventory(private_items: list[dict] | None = None) -> dict:
+    private_items = private_items if private_items is not None else private_account_inventory()
     items = [_public_item(item) for item in private_items]
     summary = {
         "total": len(items),
@@ -539,6 +618,7 @@ def import_account_credentials(text: object) -> dict:
         for email, password, sso in records:
             if sso:
                 _write_account_file(email, password, sso)
+    _invalidate_inventory_cache()
     return {
         "ok": True,
         "input_count": len(records),
@@ -820,6 +900,7 @@ def delete_account_resources(
             removed_files.append(str(path))
         except OSError as exc:
             errors.append({"path": str(path), "error": _clean_text(exc)})
+    _invalidate_inventory_cache()
     return {
         "ok": not errors,
         "deleted": len(selected),

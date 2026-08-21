@@ -21,11 +21,16 @@ try:
         import_account_credentials,
         mark_accounts_queued,
         parse_sso_values,
+        private_account_inventory,
         private_accounts,
         read_account_inventory,
         reset_incomplete_accounts,
     )
-    from webui.account_sso_check_ops import sso_check_annotations, sso_check_status
+    from webui.account_sso_check_ops import (
+        _read_private_report as _read_sso_check_report,
+        sso_check_annotations,
+        sso_check_status,
+    )
     from webui.process_utils import find_managed_processes, terminate_managed_processes, write_pid_file
     from webui.security_utils import redact_log_line
 except ImportError:  # running from webui/
@@ -38,11 +43,16 @@ except ImportError:  # running from webui/
         import_account_credentials,
         mark_accounts_queued,
         parse_sso_values,
+        private_account_inventory,
         private_accounts,
         read_account_inventory,
         reset_incomplete_accounts,
     )
-    from account_sso_check_ops import sso_check_annotations, sso_check_status  # type: ignore
+    from account_sso_check_ops import (  # type: ignore
+        _read_private_report as _read_sso_check_report,
+        sso_check_annotations,
+        sso_check_status,
+    )
     from process_utils import find_managed_processes, terminate_managed_processes, write_pid_file  # type: ignore
     from security_utils import redact_log_line  # type: ignore
 
@@ -271,9 +281,13 @@ def account_login_status() -> dict:
     with _WATCH_LOCK:
         watcher_pids = sorted(_ACTIVE_WATCHERS)
     if not workers and not watcher_pids:
-        reset_incomplete_accounts(_stale_job_reason())
-    inventory = read_account_inventory()
-    annotations = sso_check_annotations()
+        # This state-file update is cheap; avoid scanning the latest log on
+        # every five-second panel refresh.
+        reset_incomplete_accounts()
+    private_items = private_account_inventory()
+    inventory = read_account_inventory(private_items)
+    sso_report = _read_sso_check_report()
+    annotations = sso_check_annotations(private_items=private_items, report=sso_report)
     for item in inventory["items"]:
         check = annotations.get(item["id"])
         item["sso_check_status"] = str((check or {}).get("status") or "not_checked")
@@ -287,7 +301,12 @@ def account_login_status() -> dict:
             "sso_invalid": sum(1 for item in inventory["items"] if item["sso_check_status"] == "invalid"),
         }
     )
-    check_status = sso_check_status()
+    sso_workers = [
+        item
+        for item in workers
+        if "account_sso_check_worker.py" in str(item.get("cmd") or "")
+    ]
+    check_status = sso_check_status(workers=sso_workers, report=sso_report)
     log_tail = _read_latest_log_tail()
     report = _read_report()
     if workers:

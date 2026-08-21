@@ -23,6 +23,7 @@ tests=(
   tests/test_batch_traffic.py
   tests/test_retry_policy.py
   tests/test_monitor_http.py
+  tests/test_monitor_performance.py
   tests/test_proxy_store.py
   tests/test_proxy_worker_integration.py
   tests/test_email_provider_store.py
@@ -68,6 +69,7 @@ done
   account_login_worker.py \
   account_sso_match_worker.py \
   account_sso_check_worker.py \
+  scripts/run_python_isolated.py \
   scripts/check_bfs.py \
   scripts/check_sso_state.py \
   webui/bfs_ops.py \

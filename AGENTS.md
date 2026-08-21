@@ -173,6 +173,22 @@ share browser profiles, cookies, or authentication state between accounts.
 
 - `GROK_PYTHON_BIN` may select an external interpreter. Preserve `.venv/bin`
   and `.venv/Scripts` discovery.
+- In the Windows PowerShell workspace, do not invoke `bash`, WSL, Git Bash,
+  `wsl.exe`, or shell scripts that may launch them. They can terminate the
+  caller's PowerShell session. Run verification with short, native PowerShell
+  commands using the selected Python interpreter.
+- Do not run long chained/batch commands or parallel test processes in this
+  workspace. Execute one test or one compile/check command at a time, wait for
+  it to finish, and then start the next command. Avoid background processes
+  unless the task explicitly requires a service to stay running.
+- Never invoke a test file or Python verification module directly from the
+  caller's Windows PowerShell session. Route it through
+  `python scripts/run_python_isolated.py -- <python arguments>` so the actual
+  verification runs without sharing the caller's console or process group.
+- For full verification on Windows, use the native `powershell -File
+  scripts/run_tests_windows.ps1` entry point. Do not invoke the POSIX
+  `scripts/run_tests.sh` from Windows PowerShell. The Windows runner must keep
+  using `scripts/run_python_isolated.py` for every Python child.
 - `GROK_USE_XVFB=auto` adds Xvfb only on Linux without `DISPLAY` or
   `WAYLAND_DISPLAY`. Do not add Xvfb on macOS or Windows.
 - Windows subprocess output uses a pipe-reader thread rather than

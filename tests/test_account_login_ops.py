@@ -191,6 +191,52 @@ def test_status_does_not_overwrite_error_while_watcher_is_finishing():
             ops._ACTIVE_WATCHERS.discard(9876)
 
 
+def test_status_builds_one_inventory_snapshot_per_request():
+    private_items = [
+        {
+            "id": "e" * 20,
+            "email": "person@example.test",
+            "sso": "",
+            "status": "pending",
+        }
+    ]
+    public_inventory = {
+        "ok": True,
+        "items": [
+            {
+                "id": private_items[0]["id"],
+                "email": private_items[0]["email"],
+                "status": "pending",
+                "has_sso": False,
+            }
+        ],
+        "summary": {"total": 1},
+    }
+    with patch.object(ops, "_workers", return_value=[]), patch.object(
+        ops, "reset_incomplete_accounts", return_value=0
+    ), patch.object(
+        ops, "private_account_inventory", return_value=private_items
+    ) as inventory, patch.object(
+        ops, "read_account_inventory", return_value=public_inventory
+    ) as read, patch.object(
+        ops, "_read_sso_check_report", return_value={}
+    ) as read_sso, patch.object(
+        ops, "sso_check_annotations", return_value={}
+    ) as annotations, patch.object(
+        ops, "sso_check_status", return_value={"running": False}
+    ) as check_status, patch.object(
+        ops, "_read_latest_log_tail", return_value={"lines": [], "name": "", "truncated": False}
+    ), patch.object(ops, "_read_report", return_value={}):
+        result = ops.account_login_status()
+
+    assert result["items"][0]["sso_check_status"] == "not_checked"
+    inventory.assert_called_once_with()
+    read.assert_called_once_with(private_items)
+    read_sso.assert_called_once_with()
+    annotations.assert_called_once_with(private_items=private_items, report={})
+    check_status.assert_called_once_with(workers=[], report={})
+
+
 def test_worker_exit_label_identifies_linux_oom_signal():
     label = ops._worker_exit_label(137)
     assert "SIGKILL" in label

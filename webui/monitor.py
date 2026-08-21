@@ -222,6 +222,19 @@ VENV_PY = runtime_python(ROOT)
 ORCH_SCRIPT = ROOT / "run_until_100.py"
 CONTROL_LOCK = threading.RLock()
 START_LOCK = threading.Lock()
+_STATS_CACHE_LOCK = threading.Lock()
+_STATS_CACHE: tuple[tuple, float, dict] | None = None
+_PARSE_LOG_CACHE_LOCK = threading.Lock()
+_PARSE_LOG_CACHE: tuple[tuple, dict] | None = None
+_BLACKLIST_CACHE: tuple[tuple, float, dict] | None = None
+_CPA_COUNT_CACHE: tuple[tuple, int] | None = None
+_PROCESS_CACHE_LOCK = threading.Lock()
+_PROCESS_CACHE: tuple[float, dict] | None = None
+_PROCESS_CACHE_TTL = 3.0
+_DISCOVER_LOG_CACHE_LOCK = threading.Lock()
+_DISCOVER_LOG_CACHE: tuple[str, float, Path | None] | None = None
+_DISCOVER_LOG_CACHE_TTL = 3.0
+_SUCCESS_LOG_UNSET = object()
 DEFAULT_MAX_REQUEST_BODY = 16 * 1024 * 1024
 try:
     MAX_REQUEST_BODY = max(
@@ -317,12 +330,25 @@ def save_control(updates: dict) -> dict:
 
 
 def discover_log():
+    global _DISCOVER_LOG_CACHE
     env = os.environ.get("BATCH_LOG")
     if env and Path(env).is_file():
         return Path(env)
+    path_key = str(LOG_DIR)
+    now = time.monotonic()
+    with _DISCOVER_LOG_CACHE_LOCK:
+        if (
+            _DISCOVER_LOG_CACHE
+            and _DISCOVER_LOG_CACHE[0] == path_key
+            and now - _DISCOVER_LOG_CACHE[1] < _DISCOVER_LOG_CACHE_TTL
+        ):
+            return _DISCOVER_LOG_CACHE[2]
     cands = sorted(LOG_DIR.glob("batch*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
     cands = [p for p in cands if "sticky" not in p.name and "rotate" not in p.name]
-    return cands[0] if cands else None
+    result = cands[0] if cands else None
+    with _DISCOVER_LOG_CACHE_LOCK:
+        _DISCOVER_LOG_CACHE = (path_key, time.monotonic(), result)
+    return result
 
 
 def read_base():
@@ -339,8 +365,20 @@ def read_base():
         return 0
 
 
-def process_running():
+def _invalidate_process_cache() -> None:
+    global _PROCESS_CACHE
+    with _PROCESS_CACHE_LOCK:
+        _PROCESS_CACHE = None
+
+
+def process_running(*, fresh: bool = False):
     """Detect orch and/or batch workers."""
+    global _PROCESS_CACHE
+    now = time.monotonic()
+    if not fresh:
+        with _PROCESS_CACHE_LOCK:
+            if _PROCESS_CACHE and now - _PROCESS_CACHE[0] < _PROCESS_CACHE_TTL:
+                return json.loads(json.dumps(_PROCESS_CACHE[1]))
     info = {
         "running": False,
         "pid": None,
@@ -353,8 +391,9 @@ def process_running():
         "batch_pid": None,
         "batch_etime": None,
     }
-    orch = _find_managed_processes(("run_until_100.py",))
-    batch = _find_managed_processes(("run_batch_headless.py",))
+    processes = _find_managed_processes(("run_until_100.py", "run_batch_headless.py"))
+    orch = [item for item in processes if "run_until_100.py" in str(item.get("cmd") or "")]
+    batch = [item for item in processes if "run_batch_headless.py" in str(item.get("cmd") or "")]
 
     def primary(items):
         if not items:
@@ -380,13 +419,24 @@ def process_running():
             info["pid"] = batch_item["pid"]
             info["etime"] = batch_item.get("etime")
             info["cmd"] = batch_item.get("cmd")
+    with _PROCESS_CACHE_LOCK:
+        _PROCESS_CACHE = (time.monotonic(), json.loads(json.dumps(info)))
     return info
 
 
 def parse_log(path, max_tail=400_000):
     if not path or not path.is_file():
         return {"error": "no log"}
-    size = path.stat().st_size
+    global _PARSE_LOG_CACHE
+    try:
+        stat = path.stat()
+        signature = (str(path), int(stat.st_mtime_ns), int(stat.st_size), int(max_tail))
+    except OSError:
+        return {"error": "no log"}
+    with _PARSE_LOG_CACHE_LOCK:
+        if _PARSE_LOG_CACHE and _PARSE_LOG_CACHE[0] == signature:
+            return json.loads(json.dumps(_PARSE_LOG_CACHE[1]))
+    size = stat.st_size
     with path.open("rb") as f:
         if size > max_tail:
             f.seek(size - max_tail)
@@ -466,7 +516,7 @@ def parse_log(path, max_tail=400_000):
         bot1 = gcount("botFlagSource=1")
         bfs_hits = gcount("JWT bfs 标记") + gcount("bfs_flagged")
 
-    return {
+    result = {
         "log": path.name,
         "log_name": path.name,
         "log_size": size,
@@ -490,16 +540,31 @@ def parse_log(path, max_tail=400_000):
         "tail": [redact_log_line(line) for line in last_lines],
         "mail_tail": mail_lines,
     }
+    with _PARSE_LOG_CACHE_LOCK:
+        _PARSE_LOG_CACHE = (signature, json.loads(json.dumps(result)))
+    return result
 
 
 def cpa_count():
+    global _CPA_COUNT_CACHE
     try:
-        return sum(1 for p in CPA_DIR.iterdir() if p.is_file() and p.name.startswith("xai-"))
+        stat = CPA_DIR.stat()
+        signature = (str(CPA_DIR), int(stat.st_mtime_ns))
+    except OSError:
+        signature = (str(CPA_DIR), False)
+    with _STATS_CACHE_LOCK:
+        if _CPA_COUNT_CACHE and _CPA_COUNT_CACHE[0] == signature:
+            return _CPA_COUNT_CACHE[1]
+    try:
+        count = sum(1 for p in CPA_DIR.iterdir() if p.is_file() and p.name.startswith("xai-"))
     except Exception:
         try:
-            return sum(1 for _ in CPA_DIR.iterdir() if _.is_file())
+            count = sum(1 for _ in CPA_DIR.iterdir() if _.is_file())
         except Exception:
-            return 0
+            count = 0
+    with _STATS_CACHE_LOCK:
+        _CPA_COUNT_CACHE = (signature, count)
+    return count
 
 
 def read_blacklist():
@@ -508,13 +573,31 @@ def read_blacklist():
 
 def blacklist_update_errors():
     """Count blacklist expansion / ASN lookup errors from orch logs."""
+    global _BLACKLIST_CACHE
+    now = time.monotonic()
+    with _STATS_CACHE_LOCK:
+        if _BLACKLIST_CACHE and now - _BLACKLIST_CACHE[1] < 10.0:
+            return json.loads(json.dumps(_BLACKLIST_CACHE[2]))
+    candidates = []
+    try:
+        candidates = sorted(LOG_DIR.glob("orch100*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:8]
+        candidates += sorted(LOG_DIR.glob("orch100-stdout.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:1]
+        signature = tuple(
+            (str(path), int(path.stat().st_mtime_ns), int(path.stat().st_size))
+            for path in candidates
+            if path.is_file()
+        )
+    except OSError:
+        signature = ()
+    with _STATS_CACHE_LOCK:
+        if _BLACKLIST_CACHE and _BLACKLIST_CACHE[0] == signature:
+            return json.loads(json.dumps(_BLACKLIST_CACHE[2]))
     added = []
     lookup_fails = 0
     analyze_errors = 0
     hit_pause = 0
     try:
-        logs = sorted(LOG_DIR.glob("orch100*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:8]
-        logs += sorted(LOG_DIR.glob("orch100-stdout.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:1]
+        logs = list(candidates)
         seen = set()
         for path in logs:
             if str(path) in seen or not path.is_file():
@@ -547,7 +630,7 @@ def blacklist_update_errors():
         if len(uniq) >= 30:
             break
     uniq.reverse()
-    return {
+    result = {
         "lookup_fail_count": lookup_fails,
         "analyze_error_count": analyze_errors,
         "error_count": lookup_fails + analyze_errors,
@@ -555,12 +638,39 @@ def blacklist_update_errors():
         "recent_added": uniq[-15:],
         "added_total": len(added),
     }
+    with _STATS_CACHE_LOCK:
+        _BLACKLIST_CACHE = (signature, time.monotonic(), json.loads(json.dumps(result)))
+    return result
 
 
-def success_stats():
+def success_stats(current_log=_SUCCESS_LOG_UNSET):
     """Aggregate success stats: CPA + jsonl + time-window rates + latest batch."""
     from datetime import datetime, timezone, timedelta
     from runtime_platform import TZ_BEIJING
+
+    global _STATS_CACHE
+    log = discover_log() if current_log is _SUCCESS_LOG_UNSET else current_log
+
+    def _signature(path: Path | None) -> tuple:
+        if path is None:
+            return ("", False)
+        try:
+            stat = path.stat()
+        except OSError:
+            return (str(path), False)
+        return (str(path), True, int(stat.st_mtime_ns), int(stat.st_size))
+
+    signature = (
+        _signature(LOG_DIR / "register_results.jsonl"),
+        _signature(log),
+        _signature(CONTROL_FILE),
+        _signature(BASE_FILE),
+        _signature(CPA_DIR),
+        int(time.time() // 30),
+    )
+    with _STATS_CACHE_LOCK:
+        if _STATS_CACHE and _STATS_CACHE[0] == signature:
+            return json.loads(json.dumps(_STATS_CACHE[2]))
 
     cpa = cpa_count()
     configured_base = read_base()
@@ -668,7 +778,6 @@ def success_stats():
             "since": b["since"],
         }
 
-    log = discover_log()
     parsed = parse_log(log) if log else {}
     batch_ok = parsed.get("ok") or 0
     batch_fail = parsed.get("fail") or 0
@@ -691,6 +800,8 @@ def success_stats():
         _write_json(STATS_CACHE, data)
     except Exception:
         pass
+    with _STATS_CACHE_LOCK:
+        _STATS_CACHE = (signature, time.monotonic(), json.loads(json.dumps(data)))
     return data
 
 
@@ -723,6 +834,7 @@ def kill_all():
     killed = _terminate_managed_processes(
         ("run_until_100.py", "run_batch_headless.py")
     )
+    _invalidate_process_cache()
     return {"ok": True, "killed": killed}
 
 
@@ -753,7 +865,7 @@ def _registration_env() -> dict[str, str]:
 
 
 def _start_orch_unlocked():
-    proc = process_running()
+    proc = process_running(fresh=True)
     if proc.get("orch_running") or proc.get("batch_running"):
         return {"ok": False, "error": "already running", "process": proc}
     if _find_managed_processes(("sso_to_auth_json.py",)):
@@ -808,6 +920,7 @@ def _start_orch_unlocked():
     finally:
         stdout.close()
     write_pid_file(ORCH_PID, p.pid)
+    _invalidate_process_cache()
     return {
         "ok": True,
         "pid": p.pid,
@@ -829,7 +942,7 @@ def start_orch():
 
 
 def _start_batch_only_unlocked():
-    proc = process_running()
+    proc = process_running(fresh=True)
     if proc.get("batch_running") or proc.get("orch_running"):
         return {"ok": False, "error": "already running", "process": proc}
     if _find_managed_processes(("sso_to_auth_json.py",)):
@@ -868,6 +981,7 @@ def _start_batch_only_unlocked():
     finally:
         fout.close()
     write_pid_file(BATCH_PID, p.pid)
+    _invalidate_process_cache()
     return {
         "ok": True,
         "pid": p.pid,
@@ -895,7 +1009,7 @@ def snapshot():
     bl = read_blacklist()
     bl_err = blacklist_update_errors()
     try:
-        rates = success_stats().get("rates") or {}
+        rates = success_stats(log).get("rates") or {}
     except Exception:
         rates = {}
     target = parsed.get("count_target") or control.get("batch_count") or 40
@@ -3032,16 +3146,27 @@ function renderProxyPool(data) {
     </tr>`;
   }).join("") : '<tr><td colspan="7" class="proxy-empty">代理池为空，可在上方导入单条或批量代理</td></tr>';
 }
+const refreshFlights = Object.create(null);
+function refreshOnce(name, task) {
+  if (refreshFlights[name]) return refreshFlights[name];
+  const promise = Promise.resolve().then(task).finally(() => {
+    if (refreshFlights[name] === promise) refreshFlights[name] = null;
+  });
+  refreshFlights[name] = promise;
+  return promise;
+}
 async function refreshProxies(authHelp = false) {
-  try {
-    const data = await api("/api/proxies?_=" + Date.now(), { authHelp });
-    renderProxyPool(data);
-    if (!data.ok && data.error) setMsg("proxy-msg", data.error, "err");
-  } catch (e) {
-    const message = String(e.message || e);
-    document.getElementById("proxy-updated").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
-    setMsg("proxy-msg", message, "err");
-  }
+  return refreshOnce("proxies", async () => {
+    try {
+      const data = await api("/api/proxies?_=" + Date.now(), { authHelp });
+      renderProxyPool(data);
+      if (!data.ok && data.error) setMsg("proxy-msg", data.error, "err");
+    } catch (e) {
+      const message = String(e.message || e);
+      document.getElementById("proxy-updated").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
+      setMsg("proxy-msg", message, "err");
+    }
+  });
 }
 function proxyImportMessage(result, prefix) {
   const errors = result.errors || [];
@@ -3216,15 +3341,17 @@ function collectEmailProviderSettings() {
   return settings;
 }
 async function refreshEmailProvider(authHelp = false) {
-  try {
-    const data = await api("/api/email-provider?_=" + Date.now(), { authHelp });
-    renderEmailProviderConfig(data);
-    if (!data.ok && data.error) setMsg("mail-provider-msg", data.error, "err");
-  } catch (e) {
-    const message = String(e.message || e);
-    document.getElementById("mail-provider-heading-label").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
-    setMsg("mail-provider-msg", message, "err");
-  }
+  return refreshOnce("email-provider", async () => {
+    try {
+      const data = await api("/api/email-provider?_=" + Date.now(), { authHelp });
+      renderEmailProviderConfig(data);
+      if (!data.ok && data.error) setMsg("mail-provider-msg", data.error, "err");
+    } catch (e) {
+      const message = String(e.message || e);
+      document.getElementById("mail-provider-heading-label").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
+      setMsg("mail-provider-msg", message, "err");
+    }
+  });
 }
 async function saveEmailProviderConfig() {
   const button = document.getElementById("mail-provider-save");
@@ -3307,15 +3434,17 @@ function renderEmailDomainPool(data) {
   }).join("") : '<tr><td colspan="7" class="domain-empty">域名池为空，可在上方导入自有域名或子域名</td></tr>';
 }
 async function refreshEmailDomains(authHelp = false) {
-  try {
-    const data = await api("/api/email-domains?_=" + Date.now(), { authHelp });
-    renderEmailDomainPool(data);
-    if (!data.ok && data.error) setMsg("domain-msg", data.error, "err");
-  } catch (e) {
-    const message = String(e.message || e);
-    document.getElementById("domain-updated").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
-    setMsg("domain-msg", message, "err");
-  }
+  return refreshOnce("email-domains", async () => {
+    try {
+      const data = await api("/api/email-domains?_=" + Date.now(), { authHelp });
+      renderEmailDomainPool(data);
+      if (!data.ok && data.error) setMsg("domain-msg", data.error, "err");
+    } catch (e) {
+      const message = String(e.message || e);
+      document.getElementById("domain-updated").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
+      setMsg("domain-msg", message, "err");
+    }
+  });
 }
 function domainImportMessage(result) {
   const errors = result.errors || [];
@@ -3377,20 +3506,22 @@ async function deleteEmailDomain(id) {
   } catch (e) { setMsg("domain-msg", String(e.message || e), "err"); }
 }
 async function refresh() {
-  try {
-    const d = await api("/api/status?_=" + Date.now(), { authHelp: false });
-    last = d;
-    render(d);
-  } catch (e) {
-    const message = String(e.message || e);
-    document.getElementById("clock").textContent = message.includes("令牌") ? "需要令牌" : "连接异常";
-    const sync = document.getElementById("sync-label");
-    if (sync) {
-      sync.textContent = message.includes("令牌") ? "等待令牌" : "更新失败";
-      sync.className = "badge fail";
+  return refreshOnce("status", async () => {
+    try {
+      const d = await api("/api/status?_=" + Date.now(), { authHelp: false });
+      last = d;
+      render(d);
+    } catch (e) {
+      const message = String(e.message || e);
+      document.getElementById("clock").textContent = message.includes("令牌") ? "需要令牌" : "连接异常";
+      const sync = document.getElementById("sync-label");
+      if (sync) {
+        sync.textContent = message.includes("令牌") ? "等待令牌" : "更新失败";
+        sync.className = "badge fail";
+      }
+      if (message.includes("令牌")) setMsg("ctrl-msg", message, "err");
     }
-    if (message.includes("令牌")) setMsg("ctrl-msg", message, "err");
-  }
+  });
 }
 function fillControl(d) {
   const c = d.control || {};
@@ -3449,20 +3580,24 @@ async function resetBlacklist(mode) {
   } catch (e) { setMsg("bl-msg", String(e.message || e), "err"); }
 }
 async function refreshBlacklist() {
-  try {
-    const j = await api("/api/blacklist?_=" + Date.now());
-    renderBlacklist(j, last && last.blacklist_update);
-    setMsg("bl-msg", "已刷新 / " + (j.mtime_human || "") + " / " + (j.count || 0) + " ASN", "ok");
-  } catch (e) { setMsg("bl-msg", String(e.message || e), "err"); }
+  return refreshOnce("blacklist", async () => {
+    try {
+      const j = await api("/api/blacklist?_=" + Date.now());
+      renderBlacklist(j, last && last.blacklist_update);
+      setMsg("bl-msg", "已刷新 / " + (j.mtime_human || "") + " / " + (j.count || 0) + " ASN", "ok");
+    } catch (e) { setMsg("bl-msg", String(e.message || e), "err"); }
+  });
 }
 async function refreshStats(authHelp = true) {
-  try {
-    const j = await api("/api/stats?_=" + Date.now(), { authHelp });
-    // 完整统计入库；后续 2s 快照只合并本批字段
-    lastFullStats = Object.assign({}, lastFullStats || {}, j || {});
-    renderStats(lastFullStats);
-    setMsg("stats-msg", "统计已刷新 " + (j.refreshed_at || ""), "ok");
-  } catch (e) { setMsg("stats-msg", String(e.message || e), "err"); }
+  return refreshOnce("stats", async () => {
+    try {
+      const j = await api("/api/stats?_=" + Date.now(), { authHelp });
+      // 完整统计入库；后续 2s 快照只合并本批字段
+      lastFullStats = Object.assign({}, lastFullStats || {}, j || {});
+      renderStats(lastFullStats);
+      setMsg("stats-msg", "统计已刷新 " + (j.refreshed_at || ""), "ok");
+    } catch (e) { setMsg("stats-msg", String(e.message || e), "err"); }
+  });
 }
 function renderRecovery(data) {
   data = data || {};
@@ -3480,13 +3615,15 @@ function renderRecovery(data) {
   document.getElementById("recovery-stop").disabled = !data.running;
 }
 async function refreshRecovery() {
-  try {
-    const data = await api("/api/recovery?_=" + Date.now(), { authHelp: false });
-    renderRecovery(data);
-  } catch (e) {
-    const message = String(e.message || e);
-    document.getElementById("recovery-status").textContent = message.includes("令牌") ? "等待令牌" : "检查失败";
-  }
+  return refreshOnce("recovery", async () => {
+    try {
+      const data = await api("/api/recovery?_=" + Date.now(), { authHelp: false });
+      renderRecovery(data);
+    } catch (e) {
+      const message = String(e.message || e);
+      document.getElementById("recovery-status").textContent = message.includes("令牌") ? "等待令牌" : "检查失败";
+    }
+  });
 }
 async function startRecovery(scope) {
   if (scope === "accounts" && !confirm("扫描全部账号文本并补录缺失 CPA？此操作可能持续较长时间。")) return;
@@ -3639,14 +3776,23 @@ function renderAccountLogin(data) {
   const selectedInvalid = items.filter(item => selectedAccountLoginIds.has(item.id) && (item.sso_check_status === "invalid" || !item.has_sso)).length;
   document.getElementById("account-sso-delete-invalid").disabled = running || selectedInvalid === 0 || selectedInvalid !== selected;
 }
+let accountLoginRefreshPromise = null;
 async function refreshAccountLogin(authHelp = false) {
-  try {
-    const data = await api("/api/account-login?_=" + Date.now(), { authHelp });
-    renderAccountLogin(data);
-  } catch (e) {
-    const message = String(e.message || e);
-    document.getElementById("account-login-status").textContent = message.includes("令牌") ? "等待令牌" : "检查失败";
-  }
+  // Do not let the five-second poll create a queue when a large inventory is
+  // still being read.  A later poll will pick up the newest state.
+  if (accountLoginRefreshPromise) return accountLoginRefreshPromise;
+  accountLoginRefreshPromise = (async () => {
+    try {
+      const data = await api("/api/account-login?_=" + Date.now(), { authHelp });
+      renderAccountLogin(data);
+    } catch (e) {
+      const message = String(e.message || e);
+      document.getElementById("account-login-status").textContent = message.includes("令牌") ? "等待令牌" : "检查失败";
+    } finally {
+      accountLoginRefreshPromise = null;
+    }
+  })();
+  return accountLoginRefreshPromise;
 }
 async function importAccountLoginInput() {
   const input = document.getElementById("account-login-input");
@@ -3790,13 +3936,15 @@ function renderBfs(data) {
   }
 }
 async function refreshBfs(authHelp = false) {
-  try {
-    const data = await api("/api/bfs?_=" + Date.now(), { authHelp });
-    renderBfs(data);
-  } catch (e) {
-    const st = document.getElementById("bfs-status");
-    if (st) st.textContent = String(e.message || e).includes("令牌") ? "等待令牌" : "检查失败";
-  }
+  return refreshOnce("bfs", async () => {
+    try {
+      const data = await api("/api/bfs?_=" + Date.now(), { authHelp });
+      renderBfs(data);
+    } catch (e) {
+      const st = document.getElementById("bfs-status");
+      if (st) st.textContent = String(e.message || e).includes("令牌") ? "等待令牌" : "检查失败";
+    }
+  });
 }
 async function runBfsScan() {
   setMsg("bfs-msg", "正在扫描 CPA / Grok2API auth …", "");
@@ -3906,13 +4054,15 @@ function renderSsoRows(data) {
   }).join("");
 }
 async function refreshSsoState(authHelp = false) {
-  try {
-    const data = await api("/api/sso-state?_=" + Date.now(), { authHelp });
-    renderSsoState(data);
-  } catch (e) {
-    const st = document.getElementById("sso-dash-status");
-    if (st) st.textContent = String(e.message || e).includes("令牌") ? "等待令牌" : "检查失败";
-  }
+  return refreshOnce("sso-state", async () => {
+    try {
+      const data = await api("/api/sso-state?_=" + Date.now(), { authHelp });
+      renderSsoState(data);
+    } catch (e) {
+      const st = document.getElementById("sso-dash-status");
+      if (st) st.textContent = String(e.message || e).includes("令牌") ? "等待令牌" : "检查失败";
+    }
+  });
 }
 async function startSsoScan() {
   setMsg("sso-msg", "正在启动 SSO 风控扫描 ...", "");

@@ -7,6 +7,7 @@ import os
 import secrets
 import threading
 import time
+import copy
 from pathlib import Path
 import sys
 
@@ -47,6 +48,9 @@ VALID_SOURCES = ("paste", "pending", "accounts", "risk")
 _lock = threading.Lock()
 _cancel = threading.Event()
 _thread: threading.Thread | None = None
+_SOURCE_CACHE_TTL = 10.0
+_source_cache: tuple[tuple, tuple, float, dict] | None = None
+_saved_report_cache: tuple[tuple, dict] | None = None
 _state: dict = {
     "running": False,
     "started_at": "",
@@ -61,6 +65,33 @@ _state: dict = {
     "items": [],
     "run_id": "",
 }
+
+
+def _path_signature(path: Path) -> tuple:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), False)
+    return (str(path), True, int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _source_signature() -> tuple:
+    account_files = []
+    try:
+        for path in ACCOUNTS_DIR.glob("*.txt"):
+            if path.is_file():
+                account_files.append(_path_signature(path))
+    except OSError:
+        pass
+    return (
+        _path_signature(PENDING_FILE),
+        _path_signature(RISK_FILE),
+        (str(ACCOUNTS_DIR), tuple(sorted(account_files))),
+    )
+
+
+def _source_path_key() -> tuple:
+    return tuple(str(path) for path in (PENDING_FILE, RISK_FILE, ACCOUNTS_DIR))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -190,20 +221,36 @@ def _public_summary(summary: dict) -> dict:
 
 
 def _load_saved_report() -> dict:
+    global _saved_report_cache
+    signature = _path_signature(REPORT_FILE)
+    with _lock:
+        if _saved_report_cache and _saved_report_cache[0] == signature:
+            return copy.deepcopy(_saved_report_cache[1])
     if not REPORT_FILE.is_file():
-        return {}
+        report = {}
+        with _lock:
+            _saved_report_cache = (signature, report)
+        return report
     try:
         data = json.loads(REPORT_FILE.read_text(encoding="utf-8") or "{}")
     except Exception:
-        return {}
+        report = {}
+        with _lock:
+            _saved_report_cache = (signature, report)
+        return report
     if not isinstance(data, dict):
-        return {}
+        report = {}
+        with _lock:
+            _saved_report_cache = (signature, report)
+        return report
     items = [dict(it) for it in (data.get("items") or []) if isinstance(it, dict)]
     out = _public_summary(data)
     out["items"] = items[-500:]
     out["source"] = str(data.get("source") or "")
     out["proxy"] = redact_proxy(str(data.get("proxy") or ""))
     out["run_id"] = str(data.get("run_id") or "")
+    with _lock:
+        _saved_report_cache = (signature, copy.deepcopy(out))
     return out
 
 
@@ -271,11 +318,34 @@ def _load_source_records(source: str, paste: str) -> list[SsoInput]:
 
 
 def source_counts() -> dict:
-    return {
+    global _source_cache
+    now = time.monotonic()
+    path_key = _source_path_key()
+    with _lock:
+        if (
+            _source_cache
+            and _source_cache[0] == path_key
+            and now - _source_cache[2] < _SOURCE_CACHE_TTL
+        ):
+            return dict(_source_cache[3])
+    signature = _source_signature()
+    with _lock:
+        if (
+            _source_cache
+            and _source_cache[0] == path_key
+            and _source_cache[1] == signature
+        ):
+            result = dict(_source_cache[3])
+            _source_cache = (path_key, signature, time.monotonic(), dict(result))
+            return result
+    result = {
         "pending": _nonempty_line_count(PENDING_FILE),
         "accounts": _account_txt_count(),
         "risk": _nonempty_line_count(RISK_FILE),
     }
+    with _lock:
+        _source_cache = (path_key, signature, time.monotonic(), dict(result))
+    return result
 
 
 def sso_state_status() -> dict:

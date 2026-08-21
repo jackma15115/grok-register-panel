@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+import copy
+import threading
 import time
 from pathlib import Path
 
@@ -43,6 +45,63 @@ VENV_PY = runtime_python(ROOT)
 CONFIG_FILE = Path(
     os.environ.get("GROK_REGISTER_CONFIG_FILE", str(ROOT / "config.json"))
 )
+
+_STATUS_CACHE_TTL = 10.0
+_STATUS_CACHE_LOCK = threading.Lock()
+_STATUS_BUILD_LOCK = threading.Lock()
+_STATUS_CACHE: tuple[tuple, tuple, float, dict] | None = None
+_REPORT_CACHE: tuple[tuple, dict] | None = None
+
+
+def _file_signature(path: Path) -> tuple:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), False)
+    return (str(path), True, int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _directory_signature(path: Path, suffix: str | None = None) -> tuple:
+    try:
+        directory = path.stat()
+    except OSError:
+        return (str(path), False)
+    entries = []
+    try:
+        for item in path.glob(f"*{suffix}" if suffix else "*"):
+            if item.is_file():
+                entries.append(_file_signature(item))
+    except OSError:
+        pass
+    return (str(path), True, int(directory.st_mtime_ns), tuple(sorted(entries)))
+
+
+def _status_input_signature() -> tuple:
+    return (
+        _file_signature(PENDING_FILE),
+        _file_signature(RISK_FILE),
+        _directory_signature(ACCOUNTS_DIR, ".txt"),
+        _directory_signature(CPA_DIR, ".json"),
+    )
+
+
+def _status_path_key() -> tuple:
+    return tuple(
+        str(path)
+        for path in (PENDING_FILE, RISK_FILE, ACCOUNTS_DIR, CPA_DIR, REPORT_FILE)
+    )
+
+
+def _cached_report() -> dict:
+    global _REPORT_CACHE
+    signature = _file_signature(REPORT_FILE)
+    with _STATUS_CACHE_LOCK:
+        if _REPORT_CACHE and _REPORT_CACHE[0] == signature:
+            return copy.deepcopy(_REPORT_CACHE[1])
+    report = _read_report_uncached()
+    with _STATUS_CACHE_LOCK:
+        _REPORT_CACHE = (signature, copy.deepcopy(report))
+    return report
 
 
 def _parse_line(line: str) -> tuple[str, str] | None:
@@ -117,7 +176,7 @@ def _cpa_emails() -> set[str]:
     return emails
 
 
-def _read_report() -> dict:
+def _read_report_uncached() -> dict:
     try:
         report = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -146,26 +205,67 @@ def _read_report() -> dict:
     }
 
 
+def _read_report() -> dict:
+    return _cached_report()
+
+
 def recovery_status() -> dict:
-    pending = _records_from_file(PENDING_FILE)
-    all_records = _account_records()
-    cpa_emails = _cpa_emails()
-    recoverable = sum(
-        1
-        for email in all_records.values()
-        if not email or email not in cpa_emails
-    )
+    global _STATUS_CACHE
     jobs = find_managed_processes(ROOT, ("sso_to_auth_json.py",))
-    return {
-        "ok": True,
-        "running": bool(jobs),
-        "pid": jobs[0]["pid"] if jobs else None,
-        "pending_count": len(pending),
-        "account_record_count": len(all_records),
-        "recoverable_count": recoverable,
-        "risk_rejected_count": _nonempty_line_count(RISK_FILE),
-        "last_report": _read_report(),
-    }
+    now = time.monotonic()
+    path_key = _status_path_key()
+    with _STATUS_CACHE_LOCK:
+        cached = _STATUS_CACHE
+        if cached and cached[0] == path_key and now - cached[2] < _STATUS_CACHE_TTL:
+            result = copy.deepcopy(cached[3])
+            result.update({"running": bool(jobs), "pid": jobs[0]["pid"] if jobs else None})
+            return result
+
+    with _STATUS_BUILD_LOCK:
+        now = time.monotonic()
+        signature = _status_input_signature()
+        with _STATUS_CACHE_LOCK:
+            cached = _STATUS_CACHE
+            if (
+                cached
+                and cached[0] == path_key
+                and cached[1] == signature
+            ):
+                result = copy.deepcopy(cached[3])
+                result.update({"running": bool(jobs), "pid": jobs[0]["pid"] if jobs else None})
+                _STATUS_CACHE = (
+                    path_key,
+                    signature,
+                    time.monotonic(),
+                    copy.deepcopy(result),
+                )
+                return result
+        pending = _records_from_file(PENDING_FILE)
+        all_records = _account_records()
+        cpa_emails = _cpa_emails()
+        recoverable = sum(
+            1
+            for email in all_records.values()
+            if not email or email not in cpa_emails
+        )
+        result = {
+            "ok": True,
+            "running": bool(jobs),
+            "pid": jobs[0]["pid"] if jobs else None,
+            "pending_count": len(pending),
+            "account_record_count": len(all_records),
+            "recoverable_count": recoverable,
+            "risk_rejected_count": _nonempty_line_count(RISK_FILE),
+            "last_report": _read_report(),
+        }
+        with _STATUS_CACHE_LOCK:
+            _STATUS_CACHE = (
+                path_key,
+                signature,
+                time.monotonic(),
+                copy.deepcopy(result),
+            )
+        return result
 
 
 def start_recovery(scope: str = "pending") -> dict:
