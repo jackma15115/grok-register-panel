@@ -57,6 +57,7 @@ from secure_files import (
     ensure_private_dir,
     exclusive_file_lock,
 )
+from sso_utils import normalize_sso_token
 
 CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 OIDC_ISSUER = "https://auth.x.ai"
@@ -234,9 +235,7 @@ def inspect_jwt_bfs(token: str) -> dict:
     ``bfs: 2`` (value may vary; presence alone is the signal).
     Distinct from grok.com ``botFlagSource`` / registration policy deny.
     """
-    raw = str(token or "").strip()
-    if raw.startswith("sso="):
-        raw = raw[4:].strip()
+    raw = normalize_sso_token(token)
     # Nested JSON blob (encrypted_primary decode, or full OAuth response)
     if raw.startswith("{"):
         try:
@@ -717,6 +716,7 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
 
 def _new_sso_session(sso_cookie: str, proxy: str = ""):
     """创建带 SSO cookie 的 curl_cffi Session。"""
+    sso_cookie = normalize_sso_token(sso_cookie)
     proxies = {"http": proxy, "https": proxy} if proxy else None
     s = requests.Session()
     if proxies:
@@ -781,7 +781,7 @@ def inspect_sso_account_state(
     """读取 grok.com 当前账号状态；诊断失败时返回 unknown，不阻断 OAuth。"""
     result = _parse_grok_account_state("")
     result.update({"status_code": 0, "url": "", "error": ""})
-    token = str(sso_cookie or "").strip()
+    token = normalize_sso_token(sso_cookie)
     if not token:
         result["error"] = "sso 为空"
         return result
@@ -1232,7 +1232,7 @@ def sso_to_token_device_browser(
 
     browser_approve(user_code, open_url) -> bool
     """
-    sso_cookie = str(sso_cookie or "").strip()
+    sso_cookie = normalize_sso_token(sso_cookie)
     if not sso_cookie:
         log("  ❌ sso 为空")
         return None
@@ -1293,7 +1293,7 @@ def sso_to_token_device_flow(sso_cookie: str, proxy: str = "", log=print) -> dic
     对齐 sub2api/gptGrok2api 的 /oauth2/device/verify + approve。
     主路径优先用 sso_to_token_device_browser（复用注册浏览器点允许）。
     """
-    sso_cookie = str(sso_cookie or "").strip()
+    sso_cookie = normalize_sso_token(sso_cookie)
     if not sso_cookie:
         log("  ❌ sso 为空")
         return None
@@ -1419,6 +1419,10 @@ def sso_to_token_auth_code(sso_cookie: str, proxy: str = "", log=print) -> dict 
     """
     global _working_next_action_id
 
+    sso_cookie = normalize_sso_token(sso_cookie)
+    if not sso_cookie:
+        log("  ❌ sso 为空")
+        return None
     s = _new_sso_session(sso_cookie, proxy=proxy)
     try:
         r = s.get("https://accounts.x.ai/", impersonate="chrome", timeout=15)
@@ -1660,7 +1664,7 @@ def sso_to_token(
       3) Authorization Code（allow_fallback）
     prefer: "device" | "auth_code"
     """
-    sso_cookie = str(sso_cookie or "").strip()
+    sso_cookie = normalize_sso_token(sso_cookie)
     if not sso_cookie:
         log("  ❌ sso 为空")
         return None
@@ -1809,7 +1813,7 @@ def token_to_cpa_record(
         "disabled": False,
         "headers": dict(CPA_GROK_HEADERS),
     }
-    sso_val = str(sso or "").strip()
+    sso_val = normalize_sso_token(sso)
     if sso_val:
         record["sso"] = sso_val
     if check_bfs:
@@ -1990,24 +1994,41 @@ def parse_sso_line(line: str, source: str = "") -> SsoInput | None:
     email = ""
     password = ""
     sso = raw
+    field_count = 1
     if "----" in raw:
         parts = [part.strip() for part in raw.split("----")]
+        field_count = len(parts)
         if len(parts) >= 3:
             email = parts[0]
             password = "----".join(parts[1:-1])
             sso = parts[-1]
         elif len(parts) == 2:
             email, sso = parts
-    if sso.startswith("sso="):
-        sso = sso[4:].strip()
+    raw_sso = sso
+    sso = normalize_sso_token(sso)
     if len(sso) < 24 or any(ch.isspace() for ch in sso):
         return None
+    raw_sso_without_wrapper = raw_sso
+    wrapper = ""
+    if raw_sso.lower().startswith("sso="):
+        wrapper = raw_sso[:4]
+        raw_sso_without_wrapper = raw_sso[4:].strip()
+    if raw_sso_without_wrapper.startswith("-"):
+        clean_field = wrapper + raw_sso_without_wrapper[1:].strip()
+        if field_count >= 3:
+            raw_line = f"{email}----{password}----{clean_field}"
+        elif field_count == 2:
+            raw_line = f"{email}----{clean_field}"
+        else:
+            raw_line = clean_field
+    else:
+        raw_line = raw
     return SsoInput(
         sso=sso,
         email=email,
         password=password,
         source=source,
-        raw_line=raw,
+        raw_line=raw_line,
     )
 
 
@@ -2129,7 +2150,9 @@ def consume_successful_records(
     if not queue_path.exists():
         return 0
     email_aware = succeeded_emails is not None
-    normalized_ssos = {str(value or "").strip() for value in (succeeded_ssos or set())}
+    normalized_ssos = {
+        normalize_sso_token(value) for value in (succeeded_ssos or set())
+    }
     normalized_emails = {
         str(value or "").strip().lower()
         for value in (succeeded_emails or set())

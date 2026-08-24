@@ -23,6 +23,7 @@ from browser_session import (
     start_browser,
     stop_browser,
 )
+from sso_utils import normalize_sso_token
 
 SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
@@ -2271,7 +2272,7 @@ def wait_for_sso_cookie(
             if name == "sso-rw" and value and not sso_rw_val:
                 sso_rw_val = value
         # 优先 sso；少数情况下只有 sso-rw
-        return (sso_val or sso_rw_val), names
+        return normalize_sso_token(sso_val or sso_rw_val), names
 
     def _page_is_signing_in():
         try:

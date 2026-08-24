@@ -61,7 +61,7 @@ def test_password_login_returns_sso_without_logging_secrets():
         _native_type_element=type_element,
         _native_click_action=click_action,
         _try_sync_turnstile=lambda **_kwargs: None,
-        wait_for_sso_cookie=lambda **_kwargs: "private-sso-token",
+        wait_for_sso_cookie=lambda **_kwargs: "-private-sso-token",
     )
     ticks = itertools.count(0, 1)
     with patch.dict(sys.modules, {"browser_session": fake_browser, "register_flow": fake_flow}), patch.object(
@@ -201,7 +201,7 @@ def test_standard_form_submit_then_react_password_button_are_used():
         _native_type_element=lambda _element, _value: True,
         _native_click_action=native_click,
         _try_sync_turnstile=lambda **_kwargs: None,
-        wait_for_sso_cookie=lambda **_kwargs: "private-sso-token",
+        wait_for_sso_cookie=lambda **_kwargs: "-private-sso-token",
     )
     ticks = itertools.count(0, 1)
     with patch.dict(sys.modules, {"browser_session": fake_browser, "register_flow": fake_flow}), patch.object(

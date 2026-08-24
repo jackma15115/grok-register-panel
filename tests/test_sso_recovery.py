@@ -22,6 +22,7 @@ from sso_to_auth_json import (
     load_sso_records,
     parse_sso_line,
     should_create_default_out_dir,
+    sso_to_token,
 )
 from webui import recovery_ops
 
@@ -39,11 +40,33 @@ def test_principal_id_is_extracted_from_authenticated_account_page():
 
 
 def test_parser_preserves_email_and_password():
-    record = parse_sso_line(f"person@example.com----pass123----{TOKEN_A}")
+    record = parse_sso_line(f"person@example.com----pass123-----{TOKEN_A}")
     assert record is not None
     assert record.email == "person@example.com"
     assert record.password == "pass123"
     assert record.sso == TOKEN_A
+    assert record.raw_line == f"person@example.com----pass123----{TOKEN_A}"
+    wrapped = parse_sso_line(f"person@example.com----sso={TOKEN_A}")
+    assert wrapped is not None
+    assert wrapped.raw_line == f"person@example.com----sso={TOKEN_A}"
+
+
+def test_token_exchange_removes_spurious_leading_hyphen():
+    received = []
+
+    def fake_device_flow(sso, **_kwargs):
+        received.append(sso)
+        return {"access_token": "example-access-token"}
+
+    with patch("sso_to_auth_json.sso_to_token_device_flow", side_effect=fake_device_flow):
+        token = sso_to_token(
+            "-" + TOKEN_A,
+            allow_fallback=False,
+            log=lambda _message: None,
+        )
+
+    assert token == {"access_token": "example-access-token"}
+    assert received == [TOKEN_A]
 
 
 def test_queue_dedup_and_consume():
@@ -274,6 +297,7 @@ def test_bfs_config_defaults_are_loaded_for_cli():
 if __name__ == "__main__":
     test_principal_id_is_extracted_from_authenticated_account_page()
     test_parser_preserves_email_and_password()
+    test_token_exchange_removes_spurious_leading_hyphen()
     test_queue_dedup_and_consume()
     test_account_scan_excludes_quarantined_risk_sso()
     test_cpa_only_batch_does_not_create_auth_out()

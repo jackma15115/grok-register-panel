@@ -56,7 +56,7 @@ foreach ($test in $tests) {
 }
 
 Write-Host "[windows-tests] compileall"
-& $python "scripts/run_python_isolated.py" "--timeout" "300" "--" -m compileall -q secure_files.py webui email_providers browser_session.py connectivity.py grok_register_ttk.py register_flow.py runtime_platform.py batch_supervisor.py run_batch_headless.py run_until_100.py sso_to_auth_json.py account_login_flow.py account_login_worker.py account_sso_match_worker.py account_sso_check_worker.py scripts/run_python_isolated.py scripts/check_bfs.py scripts/check_sso_state.py webui/bfs_ops.py webui/sso_state_ops.py webui/account_sso_check_ops.py static_asset_cache.py batch_traffic.py retry_policy.py run_batch_headless_static_cache.py run_until_100_static_cache.py
+& $python "scripts/run_python_isolated.py" "--timeout" "300" "--" -m compileall -q secure_files.py sso_utils.py webui email_providers browser_session.py connectivity.py grok_register_ttk.py register_flow.py runtime_platform.py batch_supervisor.py run_batch_headless.py run_until_100.py sso_to_auth_json.py account_login_flow.py account_login_worker.py account_sso_match_worker.py account_sso_check_worker.py scripts/run_python_isolated.py scripts/check_bfs.py scripts/check_sso_state.py webui/bfs_ops.py webui/sso_state_ops.py webui/account_sso_check_ops.py static_asset_cache.py batch_traffic.py retry_policy.py run_batch_headless_static_cache.py run_until_100_static_cache.py
 if ($LASTEXITCODE -ne 0) {
   throw "compileall failed (exit code $LASTEXITCODE)"
 }

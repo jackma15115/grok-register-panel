@@ -6,6 +6,8 @@ import json
 import re
 import time
 
+from sso_utils import normalize_sso_token
+
 
 SIGNIN_URL = "https://accounts.x.ai/sign-in?redirect=grok-com"
 
@@ -223,9 +225,9 @@ def _read_sso_cookie(page) -> str:
             name = str(getattr(item, "name", "") or "")
             value = str(getattr(item, "value", "") or "").strip()
         if name == "sso" and value:
-            return value
+            return normalize_sso_token(value)
         if name == "sso-rw" and value:
-            fallback = value
+            fallback = normalize_sso_token(value)
     return fallback
 
 
@@ -468,9 +470,10 @@ def login_and_extract_sso(
                 raise AccountLoginError(
                     _timeout_error(final_flags, email_submitted=True, password_submitted=True)
                 ) from exc
-            if not str(sso or "").strip():
+            sso = normalize_sso_token(sso)
+            if not sso:
                 raise AccountLoginError("login completed without an SSO cookie")
-            return str(sso).strip()
+            return sso
 
         if (
             email_fields

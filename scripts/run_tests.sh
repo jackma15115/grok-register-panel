@@ -54,6 +54,7 @@ done
 
 "$PYTHON_BIN" -m compileall -q \
   secure_files.py \
+  sso_utils.py \
   webui \
   email_providers \
   browser_session.py \

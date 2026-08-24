@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from runtime_platform import popen_group_kwargs, runtime_python
 from sso_to_auth_json import load_sso_records
+from sso_utils import normalize_sso_token
 
 try:
     from secure_files import best_effort_fchmod, ensure_private_dir, exclusive_file_lock
@@ -114,8 +115,7 @@ def _parse_line(line: str) -> tuple[str, str] | None:
         parts = [part.strip() for part in raw.split("----")]
         email = parts[0] if len(parts) >= 2 else ""
         sso = parts[-1]
-    if sso.startswith("sso="):
-        sso = sso[4:].strip()
+    sso = normalize_sso_token(sso)
     if len(sso) < 24 or any(ch.isspace() for ch in sso):
         return None
     return email.lower(), sso

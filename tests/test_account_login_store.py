@@ -104,8 +104,8 @@ def test_import_optional_sso_writes_canonical_account_file():
         try:
             result = store.import_account_credentials(
                 "email,passwd,sso\n"
-                f"one@example.test,pass-one,sso={token_one}\n"
-                f"two@example.test,pass-two,{token_two}"
+                f"one@example.test,pass-one,sso=-{token_one}\n"
+                f"two@example.test,pass-two,-{token_two}"
             )
             assert result["added"] == 2
             assert result["sso_imported"] == 2

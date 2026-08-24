@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sso_to_auth_json import cpa_auth_filename, grok2api_auth_filename
+from sso_utils import normalize_sso_token
 
 try:
     from secure_files import atomic_write_json, atomic_write_text, exclusive_file_lock
@@ -124,7 +125,7 @@ def _account_id(email: str) -> str:
 
 
 def _sso_fingerprint(sso: object) -> str:
-    value = str(sso or "").strip()
+    value = normalize_sso_token(sso)
     return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else "missing"
 
 
@@ -153,9 +154,7 @@ def _normalize_password(value: object) -> str:
 
 
 def normalize_sso(value: object, *, required: bool = False) -> str:
-    sso = str(value or "").strip()
-    if sso.lower().startswith("sso="):
-        sso = sso[4:].strip()
+    sso = normalize_sso_token(value)
     if not sso:
         if required:
             raise AccountImportError("SSO is empty")

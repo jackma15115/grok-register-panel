@@ -30,6 +30,8 @@ except ImportError:  # running from webui/
     from process_utils import find_managed_processes, terminate_managed_processes, write_pid_file  # type: ignore
     from security_utils import redact_log_line  # type: ignore
 
+from sso_utils import normalize_sso_token
+
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "log"
@@ -213,7 +215,7 @@ def stop_sso_check() -> dict:
 
 
 def _fingerprint(sso: object) -> str:
-    value = str(sso or "").strip()
+    value = normalize_sso_token(sso)
     return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else "missing"
 
 

@@ -69,7 +69,7 @@ def test_risk_gate_runs_when_cpa_auto_add_is_disabled():
     try:
         try:
             register.ensure_sso_oauth_eligible(
-                "sso=quarantined-token",
+                "sso=-quarantined-token",
                 email="risk@example.test",
             )
         except register.RegistrationRiskDenied:

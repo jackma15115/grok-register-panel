@@ -45,7 +45,7 @@ def test_parse_quarantine_line_keeps_jwt_not_details():
 
 def test_run_check_sso_state_classifies_and_exports(monkeypatch_inspect=None):
     records = [
-        parse_sso_line(f"ok@example.test----{TOKEN}"),
+        parse_sso_line(f"ok@example.test-----{TOKEN}"),
         parse_sso_line(f"bad@example.test----{'f' * 80}"),
     ]
     states = {
@@ -95,7 +95,7 @@ def test_run_check_sso_state_classifies_and_exports(monkeypatch_inspect=None):
             assert summary["flagged_count"] == 1
             assert summary["denied_count"] == 1
             assert flagged.read_text(encoding="utf-8").count("\n") == 1
-            assert TOKEN in clean.read_text(encoding="utf-8")
+            assert clean.read_text(encoding="utf-8") == f"ok@example.test----{TOKEN}\n"
             assert "f" * 80 not in flagged.read_text(encoding="utf-8")
     finally:
         mod.inspect_sso_account_state = previous
@@ -141,7 +141,7 @@ def test_start_scan_uses_paste_and_never_returns_token():
         try:
             started = sso_state_ops.start_sso_state_scan(
                 source="paste",
-                text=f"ok@example.test----{TOKEN}\n",
+                text=f"ok@example.test-----{TOKEN}\n",
                 delay=0,
             )
             assert started["ok"] is True
@@ -160,6 +160,7 @@ def test_start_scan_uses_paste_and_never_returns_token():
             assert "o***@example.test" in export["content"]
             assert "path" not in export
             assert TOKEN in sso_state_ops.CLEAN_EXPORT.read_text(encoding="utf-8")
+            assert ("-----" + TOKEN) not in sso_state_ops.CLEAN_EXPORT.read_text(encoding="utf-8")
             assert status["run_id"] == started["run_id"]
             assert status["historical"] is False
         finally:

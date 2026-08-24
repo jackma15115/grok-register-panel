@@ -59,6 +59,7 @@ from secure_files import (
     ensure_private_dir,
     exclusive_file_lock,
 )
+from sso_utils import normalize_sso_token
 from webui.proxy_store import (
     IP_FRESH_SECONDS as _PROXY_IP_FRESH_SECONDS,
     mark_proxy_used as _mark_managed_proxy_used,
@@ -998,10 +999,7 @@ def get_user_agent():
 
 
 def _normalize_sso_token(raw_token):
-    token = str(raw_token or "").strip()
-    if token.startswith("sso="):
-        token = token[4:]
-    return token
+    return normalize_sso_token(raw_token)
 
 
 def _resolve_cpa_proxy():
@@ -1021,13 +1019,14 @@ def _resolve_cpa_proxy():
 def _append_sso_pending(email: str, sso: str, log_callback=None):
     """CPA 失败时保留 SSO，便于事后 sso_to_auth_json 重转。"""
     try:
+        sso = normalize_sso_token(sso)
         path = accounts_side_file("sso_pending.txt")
         line = f"{email}----{sso}\n" if email else f"{sso}\n"
         with exclusive_file_lock(path + ".lock"):
             duplicate = False
             try:
                 for existing in Path(path).read_text(encoding="utf-8").splitlines():
-                    if existing.strip().split("----")[-1].removeprefix("sso=").strip() == sso:
+                    if normalize_sso_token(existing.strip().split("----")[-1]) == sso:
                         duplicate = True
                         break
             except OSError:
@@ -1045,6 +1044,7 @@ def _append_sso_pending(email: str, sso: str, log_callback=None):
 def _append_sso_risk_rejected(email: str, sso: str, details: str, log_callback=None):
     """保存注册风控拒绝的 SSO；该类账号不进入待重转队列。"""
     try:
+        sso = normalize_sso_token(sso)
         path = accounts_side_file("sso_risk_rejected.txt")
         safe_details = re.sub(r"[\r\n\t]+", " ", str(details or "")).strip()
         append_private_text(path, f"{email}----{sso}----{safe_details}\n")
@@ -1058,6 +1058,7 @@ def _append_sso_risk_rejected(email: str, sso: str, details: str, log_callback=N
 def _append_sso_bfs_flagged(email: str, sso: str, details: str, log_callback=None):
     """保存 JWT bfs 标记账号（access_token/sso 含 bfs claim）。"""
     try:
+        sso = normalize_sso_token(sso)
         path = accounts_side_file("sso_bfs_flagged.txt")
         safe_details = re.sub(r"[\r\n\t]+", " ", str(details or "")).strip()
         append_private_text(path, f"{email}----{sso}----{safe_details}\n")
@@ -2483,6 +2484,7 @@ def update_nsfw_settings(session, log_callback=None):
 
 def enable_nsfw_via_browser(token="", log_callback=None):
     """在已登录的注册浏览器内调用 grok.com 接口，绕过外部 HTTP 的 CF 拦截。"""
+    token = normalize_sso_token(token)
     page_obj = _active_page()
     if page_obj is None:
         return False, "浏览器页面未就绪"
@@ -2640,6 +2642,7 @@ return (async () => {
 
 
 def enable_nsfw_for_token(token, cf_clearance="", user_agent="", log_callback=None):
+    token = normalize_sso_token(token)
     proxies = get_proxies()
     ua = user_agent or get_user_agent()
     if log_callback:

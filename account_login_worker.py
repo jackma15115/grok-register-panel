@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from secure_files import atomic_write_json, atomic_write_text
+from sso_utils import normalize_sso_token
 from webui.account_login_store import private_accounts, update_account
 from webui.security_utils import redact_log_line
 
@@ -58,6 +59,7 @@ def _install_signal_handlers() -> None:
 
 
 def _write_account_file(runtime, email: str, password: str, sso: str) -> Path:
+    sso = normalize_sso_token(sso)
     path = Path(runtime.account_file_for_email(email))
     atomic_write_text(path, f"{email}----{password}----{sso}\n")
     return path
@@ -70,7 +72,7 @@ def process_one_account(record: dict, runtime, *, worker_index: int, extract_cpa
     account_id = record["id"]
     email = record["email"]
     password = record["password"]
-    sso = str(record.get("sso") or "").strip()
+    sso = normalize_sso_token(record.get("sso"))
     browser_started = False
 
     if STOP_EVENT.is_set():
@@ -93,12 +95,14 @@ def process_one_account(record: dict, runtime, *, worker_index: int, extract_cpa
                 except Exception:
                     pass
                 raise
-            sso = login_and_extract_sso(
-                email,
-                password,
-                log_callback=_log,
-                cancel_callback=STOP_EVENT.is_set,
-                timeout=120,
+            sso = normalize_sso_token(
+                login_and_extract_sso(
+                    email,
+                    password,
+                    log_callback=_log,
+                    cancel_callback=STOP_EVENT.is_set,
+                    timeout=120,
+                )
             )
             _write_account_file(runtime, email, password, sso)
             update_account(account_id, sso=sso, last_login_at=_utc_now())

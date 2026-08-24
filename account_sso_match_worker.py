@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from secure_files import atomic_write_json, atomic_write_text
+from sso_utils import normalize_sso_token
 from webui.account_login_store import (
     attach_sso_by_email,
     parse_sso_values,
@@ -58,11 +59,13 @@ def _read_private_input(path: Path) -> list[str]:
 
 
 def _write_account_file(runtime, account: dict, sso: str) -> None:
+    sso = normalize_sso_token(sso)
     path = Path(runtime.account_file_for_email(account["email"]))
     atomic_write_text(path, f"{account['email']}----{account['password']}----{sso}\n")
 
 
 def process_one_sso(sso: str, runtime, accounts_by_email: dict[str, dict], index: int) -> dict:
+    sso = normalize_sso_token(sso)
     if STOP_EVENT.is_set():
         return {"status": "cancelled"}
 

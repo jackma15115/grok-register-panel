@@ -29,7 +29,7 @@ def test_worker_writes_canonical_account_file_and_cpa():
             account_file_for_email=lambda _email: str(account_path),
             add_sso_to_cpa=lambda _sso, **_kwargs: True,
         )
-        fake_flow = SimpleNamespace(login_and_extract_sso=lambda *_args, **_kwargs: "private-sso-token")
+        fake_flow = SimpleNamespace(login_and_extract_sso=lambda *_args, **_kwargs: "-private-sso-token")
         fake_browser = SimpleNamespace(
             start_browser=lambda **_kwargs: (object(), object()),
             stop_browser=lambda **_kwargs: None,

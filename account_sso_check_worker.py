@@ -13,6 +13,7 @@ from pathlib import Path
 
 from secure_files import atomic_write_json
 from sso_to_auth_json import sso_to_token
+from sso_utils import normalize_sso_token
 from webui.account_login_store import private_account_inventory
 from webui.security_utils import redact_log_line
 
@@ -25,7 +26,7 @@ def _utc_now() -> str:
 
 
 def _fingerprint(sso: object) -> str:
-    value = str(sso or "").strip()
+    value = normalize_sso_token(sso)
     return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else "missing"
 
 
@@ -124,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             report["cancelled"] = True
             break
         email = str(record.get("email") or "").strip().lower()
-        sso = str(record.get("sso") or "").strip()
+        sso = normalize_sso_token(record.get("sso"))
         row = {
             "id": record["id"],
             "email": email,
