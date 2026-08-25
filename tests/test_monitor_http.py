@@ -177,6 +177,24 @@ def test_panel_registration_env_enables_guarded_cache():
             os.environ["GROK_STATIC_CACHE_DIR"] = previous_dir
 
 
+def test_control_targets_have_no_configured_upper_limit():
+    previous_control_file = monitor.CONTROL_FILE
+    with tempfile.TemporaryDirectory() as temp:
+        monitor.CONTROL_FILE = Path(temp) / "monitor_control.json"
+        try:
+            saved = monitor.save_control(
+                {"batch_count": 250_000, "add_count": 2_500_000}
+            )
+            assert saved["batch_count"] == 250_000
+            assert saved["add_count"] == 2_500_000
+
+            saved = monitor.save_control({"batch_count": 0, "add_count": -1})
+            assert saved["batch_count"] == 1
+            assert saved["add_count"] == 1
+        finally:
+            monitor.CONTROL_FILE = previous_control_file
+
+
 def test_proxy_api_auth_mutations_and_redaction():
     token = "test-proxy-token-123456"
     secret = "proxy-secret-value-99"
@@ -676,6 +694,7 @@ if __name__ == "__main__":
     test_process_discovery_aggregates_explicit_release_roots()
     test_monitor_http_auth_and_headers()
     test_panel_registration_env_enables_guarded_cache()
+    test_control_targets_have_no_configured_upper_limit()
     test_proxy_api_auth_mutations_and_redaction()
     test_email_domain_api_auth_and_mutations()
     test_email_provider_api_auth_secret_masking_and_probe()

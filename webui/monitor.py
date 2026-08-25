@@ -308,11 +308,11 @@ def save_control(updates: dict) -> dict:
         except Exception:
             c["risk_pause"] = 10
         try:
-            c["batch_count"] = max(1, min(200, int(c.get("batch_count", 40))))
+            c["batch_count"] = max(1, int(c.get("batch_count", 40)))
         except Exception:
             c["batch_count"] = 40
         try:
-            c["add_count"] = max(1, min(2000, int(c.get("add_count", 40))))
+            c["add_count"] = max(1, int(c.get("add_count", 40)))
         except Exception:
             c["add_count"] = 40
         c["mode"] = c.get("mode") if c.get("mode") in ("orch", "batch") else "orch"
@@ -2229,10 +2229,10 @@ HTML = r"""<!DOCTYPE html>
         <input type="number" id="workers-input" min="1" max="24" value="3"/>
       </div>
       <div class="field"><label for="batch_count">单批目标成功数</label>
-        <input type="number" id="batch_count" min="1" max="200" value="40"/>
+        <input type="number" id="batch_count" min="1" value="40"/>
       </div>
       <div class="field"><label for="add_count">追加目标</label>
-        <input type="number" id="add_count" min="1" max="2000" value="40" title="每次启动从当前 CPA 再注册 N 个"/>
+        <input type="number" id="add_count" min="1" value="40" title="每次启动从当前 CPA 再注册 N 个"/>
       </div>
       <div class="field"><label for="risk_pause">风控阈值</label>
         <input type="number" id="risk_pause" min="1" max="50" value="10"/>

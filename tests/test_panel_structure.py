@@ -279,10 +279,13 @@ def test_panel_security_and_recovery_structure():
 def test_registration_count_is_a_success_target():
     worker = (ROOT / 'grok_register_ttk.py').read_text(encoding='utf-8')
     monitor = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    html = monitor.split('HTML = r"""', 1)[1].split('"""', 1)[0]
     assert '目标成功数' in worker
     assert 'done = int(self.success_count)' in worker
     assert worker.count('mark_slot_completed()') == 2
     assert '单批目标成功数' in monitor
+    assert re.search(r'id="batch_count" min="1"(?![^>]*\bmax=)', html)
+    assert re.search(r'id="add_count" min="1"(?![^>]*\bmax=)', html)
 
 def test_imported_account_login_panel_structure():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')

@@ -21,7 +21,7 @@ class FakeProcess:
         return self.return_code
 
 
-def _run_with_exit_codes(exit_codes):
+def _run_with_exit_codes(exit_codes, *, target=1, batch_count=40):
     names = (
         "apply_control",
         "kill_batch",
@@ -38,8 +38,10 @@ def _run_with_exit_codes(exit_codes):
     previous = {name: getattr(orch, name) for name in names}
     previous_base = orch.BASE0
     previous_target = orch.TARGET_CPA
+    previous_batch_count = orch.BATCH_COUNT
     previous_rounds = orch.MAX_ROUNDS
     launches = []
+    launch_counts = []
     messages = []
     codes = iter(exit_codes)
     try:
@@ -47,7 +49,8 @@ def _run_with_exit_codes(exit_codes):
             log_path = Path(temp) / "batch.log"
             log_path.write_text("", encoding="utf-8")
             orch.BASE0 = 0
-            orch.TARGET_CPA = 1
+            orch.TARGET_CPA = target
+            orch.BATCH_COUNT = batch_count
             orch.MAX_ROUNDS = 10
             orch.apply_control = lambda: None
             orch.kill_batch = lambda: None
@@ -60,9 +63,10 @@ def _run_with_exit_codes(exit_codes):
             orch.orchestrator_failure_limit = lambda: 2
             orch.log = messages.append
 
-            def start_batch(_count):
+            def start_batch(count):
                 code = next(codes)
                 launches.append(code)
+                launch_counts.append(count)
                 return FakeProcess(100 + len(launches), code), log_path
 
             orch.start_batch = start_batch
@@ -77,23 +81,64 @@ def _run_with_exit_codes(exit_codes):
             setattr(orch, name, value)
         orch.BASE0 = previous_base
         orch.TARGET_CPA = previous_target
+        orch.BATCH_COUNT = previous_batch_count
         orch.MAX_ROUNDS = previous_rounds
-    return launches, messages
+    return launches, launch_counts, messages
+
+
+def test_apply_control_loads_unlimited_batch_count():
+    previous_control_file = orch.CONTROL_FILE
+    previous_auths = orch.AUTHS
+    previous_batch_count = orch.BATCH_COUNT
+    previous_base = orch.BASE0
+    previous_target = orch.TARGET_CPA
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        orch.CONTROL_FILE = root / "monitor_control.json"
+        orch.AUTHS = root / "cpa_auth"
+        orch.AUTHS.mkdir()
+        orch.CONTROL_FILE.write_text(
+            '{"batch_count": 250000, "add_count": 10}', encoding="utf-8"
+        )
+        try:
+            orch.apply_control()
+            assert orch.BATCH_COUNT == 250_000
+            assert orch.TARGET_CPA == 10
+        finally:
+            orch.CONTROL_FILE = previous_control_file
+            orch.AUTHS = previous_auths
+            orch.BATCH_COUNT = previous_batch_count
+            orch.BASE0 = previous_base
+            orch.TARGET_CPA = previous_target
+
+
+def test_orchestrator_uses_configured_batch_count_and_caps_to_remaining():
+    _, launch_counts, _ = _run_with_exit_codes(
+        [PRECHECK_EXIT_CODE], target=75, batch_count=30
+    )
+    assert launch_counts == [30]
+
+    _, launch_counts, _ = _run_with_exit_codes(
+        [PRECHECK_EXIT_CODE], target=12, batch_count=30
+    )
+    assert launch_counts == [12]
 
 
 def test_precheck_failure_stops_orchestrator_immediately():
-    launches, messages = _run_with_exit_codes([PRECHECK_EXIT_CODE])
+    launches, _, messages = _run_with_exit_codes([PRECHECK_EXIT_CODE])
     assert launches == [PRECHECK_EXIT_CODE]
     assert any("precheck failed" in message for message in messages)
 
 
 def test_consecutive_abnormal_batches_are_bounded():
-    launches, messages = _run_with_exit_codes([1, 1, 1])
+    launches, _, messages = _run_with_exit_codes([1, 1, 1])
     assert launches == [1, 1]
     assert any("consecutive batch failures=2/2" in message for message in messages)
 
 
 if __name__ == "__main__":
+    test_apply_control_loads_unlimited_batch_count()
+    test_orchestrator_uses_configured_batch_count_and_caps_to_remaining()
     test_precheck_failure_stops_orchestrator_immediately()
     test_consecutive_abnormal_batches_are_bounded()
     print("OK orchestrator policy")
