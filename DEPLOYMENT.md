@@ -25,7 +25,7 @@ curl http://127.0.0.1:8787/api/health
 - `MONITOR_TOKEN` 必须使用长随机值；Compose 在缺少该变量时会拒绝启动
 - 容器内面板监听 `0.0.0.0:8787`，宿主机默认只绑定 `127.0.0.1:8787`；需要 LAN / Tailscale 访问时把 `.env` 的 `MONITOR_BIND_ADDRESS` 改成具体网卡 IP
 - 浏览器和系统依赖在构建阶段进入镜像，运行时缓存缺失才会自动补拉
-- Compose 默认使用 `linux/amd64`，让 Camoufox 在 ARM 主机上通过 Docker 模拟保持一致；确认目标版本原生支持后可覆盖 `DOCKER_PLATFORM`
+- 发布到 GHCR 的镜像同时提供 `linux/amd64` 和 `linux/arm64`；Compose 默认仍使用 `linux/amd64`，ARM 主机可设置 `DOCKER_PLATFORM=linux/arm64` 使用原生架构
 - 默认挂载 `${GROK_REGISTER_HOST_DATA_DIR:-./data/docker}` 到 `/data`
 - `/data` 包含配置、导入账号密码、SSO、CPA、Grok2API auth、日志、代理池和邮箱域名池，必须纳入私密备份
 - 保留 `shm_size: 1gb` 与 `seccomp:unconfined`，否则多浏览器并发可能不稳定

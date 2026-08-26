@@ -80,8 +80,9 @@ def test_docker_publish_workflow() -> None:
     assert "ghcr.io/${{ github.repository }}" in workflow
     assert "docker/login-action@v3" in workflow
     assert "docker/metadata-action@v5" in workflow
+    assert "docker/setup-qemu-action@v3" in workflow
     assert "docker/build-push-action@v6" in workflow
-    assert "platforms: linux/amd64" in workflow
+    assert "platforms: linux/amd64,linux/arm64" in workflow
     assert "provenance: mode=max" in workflow
     assert "sbom: true" in workflow
     assert "cache-to: type=gha,mode=max" in workflow
