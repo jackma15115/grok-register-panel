@@ -3819,11 +3819,12 @@ async function startAccountSsoMatch() {
   } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
 }
 async function startAccountSsoCheck() {
-  if (!confirm("检测账号管理中的全部 SSO？检测会逐个尝试换取令牌，期间不能运行注册或账号任务。")) return;
+  const concurrency = Number(document.getElementById("account-login-concurrency").value || 1);
+  if (!confirm(`检测账号管理中的全部 SSO？将使用登录并发 ${concurrency} 换取令牌，期间不能运行注册或账号任务。`)) return;
   setMsg("account-login-msg", "正在启动全部 SSO 检测…", "");
   try {
-    const data = await api("/api/account-login/sso-check", { method: "POST", body: "{}" });
-    setMsg("account-login-msg", "SSO 检测已启动，共 " + (data.input_count || 0) + " 个账号", "ok");
+    const data = await api("/api/account-login/sso-check", { method: "POST", body: JSON.stringify({ concurrency }) });
+    setMsg("account-login-msg", `SSO 检测已启动，共 ${data.input_count || 0} 个账号，并发 ${data.concurrency || 1}`, "ok");
     await refreshAccountLogin(false);
   } catch (e) { setMsg("account-login-msg", String(e.message || e), "err"); }
 }
@@ -4682,7 +4683,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/account-login/sso-check":
             try:
                 with START_LOCK:
-                    result = start_sso_check()
+                    result = start_sso_check(concurrency=(body or {}).get("concurrency") or 1)
                 self._json(202 if result.get("ok") else 409, result)
             except Exception as exc:
                 self._json(500, {"ok": False, "error": redact_log_line(str(exc))})

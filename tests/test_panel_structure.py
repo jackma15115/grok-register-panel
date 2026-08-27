@@ -299,6 +299,7 @@ def test_imported_account_login_panel_structure():
     assert '选择失效 / 无 SSO' in html
     assert 'id="account-login-source-filter"' in html
     assert 'id="account-login-concurrency"' in html
+    assert 'JSON.stringify({ concurrency })' in html
     assert 'id="account-login-cpa"' in html
     assert 'id="account-login-select-all"' in html
     assert 'id="account-login-start-selected"' in html

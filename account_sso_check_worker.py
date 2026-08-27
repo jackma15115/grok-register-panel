@@ -8,6 +8,7 @@ import hashlib
 import json
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,9 +68,90 @@ def _read_job(path: Path) -> dict:
         raise ValueError("SSO check job has no account ids")
     return {
         "ids": ids,
+        "concurrency": max(1, min(5, int(data.get("concurrency") or 1))),
         "report_file": Path(str(data.get("report_file") or "")).resolve(),
         "created_at": str(data.get("created_at") or ""),
     }
+
+
+def _check_one_record(
+    record: dict,
+    runtime,
+    *,
+    worker_index: int,
+    total: int,
+    prefer: str,
+) -> dict | None:
+    if STOP_EVENT.is_set():
+        return None
+    email = str(record.get("email") or "").strip().lower()
+    sso = normalize_sso_token(record.get("sso"))
+    row = {
+        "id": record["id"],
+        "email": email,
+        "status": "invalid",
+        "reason": "sso_missing" if not sso else "token_exchange_failed",
+        "error": "",
+        "sso_fingerprint": _fingerprint(sso),
+        "checked_at": _utc_now(),
+    }
+    if not sso:
+        _log(f"[account-sso-check {worker_index}/{total}] missing SSO: {email}")
+        return row
+
+    proxy = ""
+    try:
+        proxy = runtime.pick_proxy_for_worker(worker_index, 0)
+        token = sso_to_token(
+            sso,
+            proxy=proxy,
+            log=lambda message: _log(f"[account-sso-check {worker_index}] {message}"),
+            prefer=prefer,
+            allow_fallback=True,
+        )
+        if token and token.get("access_token"):
+            row.update({"status": "valid", "reason": "token_exchange_succeeded"})
+    except Exception as exc:
+        row["reason"] = "token_exchange_error"
+        row["error"] = _safe_error(exc, sso, email, proxy)
+    finally:
+        try:
+            runtime.clear_thread_proxy()
+        except Exception:
+            pass
+        try:
+            runtime.release_proxy_lease(worker_index)
+        except Exception:
+            pass
+    return row
+
+
+def _check_records(records: list[dict], runtime, *, job: dict, prefer: str, report: dict) -> None:
+    completed: dict[int, dict] = {}
+    with ThreadPoolExecutor(
+        max_workers=job["concurrency"],
+        thread_name_prefix="account-sso-check",
+    ) as pool:
+        futures = {
+            pool.submit(
+                _check_one_record,
+                record,
+                runtime,
+                worker_index=index,
+                total=len(records),
+                prefer=prefer,
+            ): index
+            for index, record in enumerate(records, 1)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            row = future.result()
+            if row is None:
+                report["cancelled"] = True
+            else:
+                completed[index] = row
+                report["items"] = [completed[key] for key in sorted(completed)]
+            _write_report(job["report_file"], report)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         "started_at": job["created_at"] or _utc_now(),
         "finished_at": "",
         "input_count": len(job["ids"]),
+        "concurrency": job["concurrency"],
         "checked_count": 0,
         "valid_count": 0,
         "invalid_count": 0,
@@ -119,47 +202,18 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"[account-sso-check] startup failed: {report['fatal_error']}")
         return 1
 
-    _log(f"[account-sso-check] start accounts={len(records)}")
-    for index, record in enumerate(records, 1):
-        if STOP_EVENT.is_set():
-            report["cancelled"] = True
-            break
-        email = str(record.get("email") or "").strip().lower()
-        sso = normalize_sso_token(record.get("sso"))
-        row = {
-            "id": record["id"],
-            "email": email,
-            "status": "invalid",
-            "reason": "sso_missing" if not sso else "token_exchange_failed",
-            "error": "",
-            "sso_fingerprint": _fingerprint(sso),
-            "checked_at": _utc_now(),
-        }
-        if not sso:
-            _log(f"[account-sso-check {index}/{len(records)}] missing SSO: {email}")
-        else:
-            proxy = ""
-            try:
-                proxy = runtime.pick_proxy_for_worker(index, 0)
-                token = sso_to_token(
-                    sso,
-                    proxy=proxy,
-                    log=lambda message: _log(f"[account-sso-check {index}] {message}"),
-                    prefer=prefer,
-                    allow_fallback=True,
-                )
-                if token and token.get("access_token"):
-                    row.update({"status": "valid", "reason": "token_exchange_succeeded"})
-            except Exception as exc:
-                row["reason"] = "token_exchange_error"
-                row["error"] = _safe_error(exc, sso, email, proxy)
-            finally:
-                try:
-                    runtime.clear_thread_proxy()
-                except Exception:
-                    pass
-        report["items"].append(row)
-        _write_report(job["report_file"], report)
+    _log(
+        f"[account-sso-check] start accounts={len(records)} "
+        f"workers={job['concurrency']}"
+    )
+    worker_failed = False
+    try:
+        _check_records(records, runtime, job=job, prefer=prefer, report=report)
+    except Exception as exc:
+        worker_failed = True
+        report["ok"] = False
+        report["fatal_error"] = _safe_error(exc)
+        _log(f"[account-sso-check] worker failed: {report['fatal_error']}")
 
     report["running"] = False
     report["finished_at"] = _utc_now()
@@ -168,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         f"[account-sso-check] finished valid={report['valid_count']} "
         f"invalid={report['invalid_count']} cancelled={report['cancelled']}"
     )
-    return 0
+    return 1 if worker_failed else 0
 
 
 if __name__ == "__main__":

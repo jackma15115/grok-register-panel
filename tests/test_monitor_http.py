@@ -595,15 +595,16 @@ def test_account_login_api_requires_write_auth_and_hides_secrets():
                     "job_kind": "sso_check",
                     "input_count": 1,
                 },
-            ):
+            ) as start_check:
                 status, _, body = request(
                     base + "/api/account-login/sso-check",
                     token=token,
                     method="POST",
-                    body=b"{}",
+                    body=json.dumps({"concurrency": 4}).encode("utf-8"),
                 )
             assert status == 202
             assert json.loads(body)["job_kind"] == "sso_check"
+            start_check.assert_called_once_with(concurrency=4)
 
             delete_payload = json.dumps({"ids": ["a" * 20]}).encode("utf-8")
             status, _, _ = request(

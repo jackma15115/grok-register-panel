@@ -80,6 +80,7 @@ def _public_report(report: dict) -> dict:
         "started_at": str(report.get("started_at") or "")[:40],
         "finished_at": str(report.get("finished_at") or "")[:40],
         "input_count": int(report.get("input_count") or 0),
+        "concurrency": max(1, min(5, int(report.get("concurrency") or 1))),
         "checked_count": int(report.get("checked_count") or 0),
         "valid_count": int(report.get("valid_count") or 0),
         "invalid_count": int(report.get("invalid_count") or 0),
@@ -121,7 +122,7 @@ def sso_check_annotations(
     return annotations
 
 
-def start_sso_check() -> dict:
+def start_sso_check(*, concurrency: object = 1) -> dict:
     if find_managed_processes(ROOT, ("run_until_100.py", "run_batch_headless.py")):
         return {"ok": False, "error": "registration task is running"}
     if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
@@ -134,12 +135,17 @@ def start_sso_check() -> dict:
     records = private_account_inventory()
     if not records:
         return {"ok": False, "error": "no accounts are available for SSO checking"}
+    try:
+        workers = max(1, min(5, int(concurrency or 1)))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "concurrency must be an integer from 1 to 5"}
 
     ensure_private_dir(LOG_DIR)
     created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     job = {
         "version": 1,
         "ids": [item["id"] for item in records],
+        "concurrency": workers,
         "report_file": str(REPORT_FILE),
         "created_at": created_at,
     }
@@ -153,6 +159,7 @@ def start_sso_check() -> dict:
             "started_at": created_at,
             "finished_at": "",
             "input_count": len(records),
+            "concurrency": workers,
             "checked_count": 0,
             "valid_count": 0,
             "invalid_count": 0,
@@ -187,6 +194,7 @@ def start_sso_check() -> dict:
                 "started_at": created_at,
                 "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "input_count": len(records),
+                "concurrency": workers,
                 "checked_count": 0,
                 "valid_count": 0,
                 "invalid_count": 0,
@@ -206,6 +214,7 @@ def start_sso_check() -> dict:
         "job_kind": "sso_check",
         "pid": process.pid,
         "input_count": len(records),
+        "concurrency": workers,
     }
 
 

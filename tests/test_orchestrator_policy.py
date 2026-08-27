@@ -21,7 +21,9 @@ class FakeProcess:
         return self.return_code
 
 
-def _run_with_exit_codes(exit_codes, *, target=1, batch_count=40):
+def _run_with_exit_codes(
+    exit_codes, *, target=1, batch_count=40, advance_on_start=False
+):
     names = (
         "apply_control",
         "kill_batch",
@@ -39,11 +41,11 @@ def _run_with_exit_codes(exit_codes, *, target=1, batch_count=40):
     previous_base = orch.BASE0
     previous_target = orch.TARGET_CPA
     previous_batch_count = orch.BATCH_COUNT
-    previous_rounds = orch.MAX_ROUNDS
     launches = []
     launch_counts = []
     messages = []
     codes = iter(exit_codes)
+    state = {"cpa": 0}
     try:
         with tempfile.TemporaryDirectory() as temp:
             log_path = Path(temp) / "batch.log"
@@ -51,10 +53,9 @@ def _run_with_exit_codes(exit_codes, *, target=1, batch_count=40):
             orch.BASE0 = 0
             orch.TARGET_CPA = target
             orch.BATCH_COUNT = batch_count
-            orch.MAX_ROUNDS = 10
             orch.apply_control = lambda: None
             orch.kill_batch = lambda: None
-            orch.cpa_count = lambda: 0
+            orch.cpa_count = lambda: state["cpa"]
             orch.read_blocklist_asns = lambda: set()
             orch.batch_alive = lambda _pid: False
             orch.count_risk = lambda _path: 0
@@ -67,6 +68,8 @@ def _run_with_exit_codes(exit_codes, *, target=1, batch_count=40):
                 code = next(codes)
                 launches.append(code)
                 launch_counts.append(count)
+                if advance_on_start:
+                    state["cpa"] += count
                 return FakeProcess(100 + len(launches), code), log_path
 
             orch.start_batch = start_batch
@@ -82,7 +85,6 @@ def _run_with_exit_codes(exit_codes, *, target=1, batch_count=40):
         orch.BASE0 = previous_base
         orch.TARGET_CPA = previous_target
         orch.BATCH_COUNT = previous_batch_count
-        orch.MAX_ROUNDS = previous_rounds
     return launches, launch_counts, messages
 
 
@@ -124,6 +126,17 @@ def test_orchestrator_uses_configured_batch_count_and_caps_to_remaining():
     assert launch_counts == [12]
 
 
+def test_orchestrator_has_no_total_round_limit():
+    launches, launch_counts, _ = _run_with_exit_codes(
+        [0] * 61,
+        target=61,
+        batch_count=1,
+        advance_on_start=True,
+    )
+    assert len(launches) == 61
+    assert launch_counts == [1] * 61
+
+
 def test_precheck_failure_stops_orchestrator_immediately():
     launches, _, messages = _run_with_exit_codes([PRECHECK_EXIT_CODE])
     assert launches == [PRECHECK_EXIT_CODE]
@@ -139,6 +152,7 @@ def test_consecutive_abnormal_batches_are_bounded():
 if __name__ == "__main__":
     test_apply_control_loads_unlimited_batch_count()
     test_orchestrator_uses_configured_batch_count_and_caps_to_remaining()
+    test_orchestrator_has_no_total_round_limit()
     test_precheck_failure_stops_orchestrator_immediately()
     test_consecutive_abnormal_batches_are_bounded()
     print("OK orchestrator policy")

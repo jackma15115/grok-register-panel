@@ -4,6 +4,7 @@
 
 ### Added
 
+- Run account-inventory SSO validity checks with the panel's configured login concurrency.
 - Publish the Docker image for both `linux/amd64` and `linux/arm64`, including the Camoufox browser for each target architecture.
 - Add an `inbucket` email provider for self-hosted Inbucket instances: generate addresses under a configured receive domain and poll the v1 mailbox API for the xAI verification code. Root domains accept a comma-separated rotation list, and `inbucket_random_levels` can stack 1-3 random subdomain labels per address (wildcard MX required).
 - Treat Windows as a first-class runtime: PowerShell setup/batch/panel scripts, Playwright `node.exe` + EPIPE guard (no bash wrapper), default headless batches, and SOCKS5 `PySocks` as a direct dependency so the panel can import remote residential URLs without Linux mixed ports.

@@ -459,7 +459,7 @@ python sso_to_auth_json.py \
 ### 导入账号管理
 
 - “账号管理”会合并手动导入库存与注册任务生成的 `accounts/{email}.txt`，按邮箱去重；注册来源账号可参与 SSO 检测和失效清理，但没有导入密码时不会进入浏览器登录任务。
-- “检测全部 SSO”会逐个尝试换取 OAuth token。没有 SSO 或换取失败的账号标记为失效；检测结果不把 `botFlag/policy` 风控状态当作删除条件，且不会通过 API 返回 SSO、密码或 token。
+- “检测全部 SSO”会复用“登录并发”（1-5）并行换取 OAuth token。没有 SSO 或换取失败的账号标记为失效；检测结果不把 `botFlag/policy` 风控状态当作删除条件，且不会通过 API 返回 SSO、密码或 token。
 - 选中最近一次完整检测中确认失效的账号后，可使用“清理选中失效账号”删除本地账号文件、导入库存、SSO 待处理记录、CPA 和 Grok2API 文件。配置了 `cpa_remote_url` 时远程 CPA 不会自动删除，接口会返回提示。
 
 - 支持 `email----password` 和 `email----password----sso`，逗号或 Tab 分隔也可带可选第三列；CSV 可使用 `email,password,sso` 或 `email,passwd,sso` 表头。冒号格式仍用于 `email:password`。单次导入不设账号条数上限，仅受 `MONITOR_MAX_REQUEST_BODY` 请求体大小控制

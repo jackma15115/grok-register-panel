@@ -37,7 +37,6 @@ BATCH_COUNT = 40
 BASE0 = int(__import__("os").environ.get("ORCH_BASE_CPA", "0") or 0)
 TARGET_CPA = BASE0 + int(__import__("os").environ.get("ORCH_ADD_COUNT", "100") or 100)
 RISK_PAUSE = 10
-MAX_ROUNDS = 60
 CONTROL_FILE = LOG_DIR / "monitor_control.json"
 
 
@@ -314,7 +313,7 @@ def main():
     round_i = 0
     consecutive_batch_failures = 0
     failure_limit = orchestrator_failure_limit()
-    while cpa_count() < TARGET_CPA and round_i < MAX_ROUNDS:
+    while cpa_count() < TARGET_CPA:
         round_i += 1
         need = TARGET_CPA - cpa_count()
         batch_n = min(need, BATCH_COUNT)
