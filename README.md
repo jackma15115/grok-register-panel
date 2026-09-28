@@ -197,8 +197,8 @@ Windows 不要把 `PLAYWRIGHT_NODEJS_PATH` 指到 `scripts/playwright-node`（�
 | 字段 | 说明 |
 |------|------|
 | `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` / `outlook_rt` / `inbucket` |
-| `outlook_rt_inventory` | Outlook MSA 库存路径（jsonl：`email`+`refresh_token`；或 `email----rt`） |
-| `outlook_rt_used_path` | 已用邮箱记录（可选；默认 `库存路径.used`） |
+| `outlook_rt_inventory` | Outlook MSA 库存路径（jsonl、`email----rt`，或 `email----password----client_id----refresh_token`） |
+| `outlook_rt_used_path` | 失效基础邮箱记录（可选；默认 `库存路径.used`） |
 | `outlook_rt_client_id` | 可选 Client ID；默认 Microsoft Authentication Broker 公共客户端 |
 | `defaultDomains` | 临时邮域名（如二级 CF 域） |
 | `cloudflare_*` / `duckmail_*` 等 | 对应邮箱 API |
@@ -403,7 +403,7 @@ python grok_register_ttk.py
 - 邮箱服务页显示脱敏后的 TI Temp Mail 收件日志；该区域不依赖 `PANEL_INCLUDE_TAIL`，也不会展示邮箱访问 Token
 - 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`、`ti-temp-mail`、`outlook_rt`
 - 顶部“邮箱服务”统一配置 `cloudflare`、`duckmail`、`yyds`、`mailnest`、`cloudmail`、`moemail`、`outlook_rt`、`inbucket`
-- `outlook_rt` 从本地 jsonl 库存取号（非购买），用 MSA `refresh_token` 刷 Graph 收 xAI 验证码
+- `outlook_rt` 从本地库存按基础账号轮询，每次生成 `prefix+随机5位英文数字@原域名`，用基础账号的 MSA `refresh_token` 刷 Graph，并按 plus 收件地址匹配 xAI 验证码；成功或超时后基础账号可继续复用，只有死 RT / 鉴权失败才写入 `.used`
 - `inbucket` 使用自建 [Inbucket](https://github.com/inbucket/inbucket) 实例：填实例地址和收信根域名即可，邮箱即建即用，无需注册 API；根域名可配多个轮换，并可按 `inbucket_random_levels` 叠加随机多级子域（需泛解析收信）
 - 切换服务商时只显示该服务实际支持的字段；保存后新的注册任务读取 `config.json`
 - 已保存的 API Key、JWT 和密码不会通过接口或页面回显；密钥输入留空会保留原值，必须点“清除”并保存才会删除

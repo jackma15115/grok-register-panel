@@ -2116,7 +2116,7 @@ def outlook_rt_take_mailbox():
             "请在配置中填写 outlook_rt_inventory（jsonl/文本库存路径，"
             "字段 email + refresh_token）"
         )
-    # 取号后立刻 refresh + Inbox 预检：空箱/死 RT 秒退并 mark used
+    # 基础账号轮询复用；每次注册生成独立 plus 地址。仅死 RT / 鉴权失败淘汰基础账号。
     def _log(msg: str) -> None:
         try:
             cli_log(msg)
@@ -2131,7 +2131,8 @@ def outlook_rt_take_mailbox():
         http_get=http_get,
         log_callback=_log,
         max_attempts=20,
-        skip_empty_inbox=True,
+        skip_empty_inbox=False,
+        plus_alias=True,
     )
 
 

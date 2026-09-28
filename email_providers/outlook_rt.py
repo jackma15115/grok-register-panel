@@ -8,8 +8,8 @@
 2) 文本行: email----refresh_token
 3) 四段: email----password----clientId----refresh_token
 
-取号：从库存领取未使用账号（非购买临时邮）。
-收信：OAuth refresh → Microsoft Graph /me/messages 轮询 xAI 验证码。
+取号：支持领取未使用账号，或轮询复用基础账号并生成 plus 地址。
+收信：OAuth refresh → Microsoft Graph /me/messages 轮询并按收件地址匹配验证码。
 """
 
 from __future__ import annotations
@@ -115,6 +115,8 @@ _code_wait_sema = threading.Semaphore(_CODE_WAIT_LIMIT)
 # refresh 连续失败多少次视为死号（秒退，避免空耗 180s）
 MAX_REFRESH_FAILURES = 2
 CLAIM_TTL_SECONDS = 60 * 60
+PLUS_TAG_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+PLUS_TAG_LENGTH = 5
 # 死号/不可用 client 的典型错误片段
 _DEAD_RT_MARKERS = (
     "client does not exist",
@@ -144,6 +146,43 @@ def used_path_for(inventory_path: str, used_path: str = "") -> Path:
 def inventory_lock_path(inventory_path: str) -> Path:
     inv = Path(normalize_inventory_path(inventory_path)).expanduser()
     return inv.with_suffix(inv.suffix + ".lock") if inv.suffix else Path(str(inv) + ".lock")
+
+
+def rotation_path_for(inventory_path: str) -> Path:
+    inv = Path(normalize_inventory_path(inventory_path)).expanduser()
+    return (
+        inv.with_suffix(inv.suffix + ".cursor")
+        if inv.suffix
+        else Path(str(inv) + ".cursor")
+    )
+
+
+def _load_rotation_cursor(inventory_path: str, account_count: int) -> int:
+    if account_count <= 0:
+        return 0
+    path = rotation_path_for(inventory_path)
+    try:
+        value = int(path.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        value = 0
+    return value % account_count
+
+
+def _save_rotation_cursor(inventory_path: str, next_index: int) -> None:
+    atomic_write_text(
+        rotation_path_for(inventory_path),
+        f"{max(0, int(next_index))}\n",
+        encoding="utf-8",
+    )
+
+
+def generate_plus_alias(base_email: str) -> str:
+    local, separator, domain = str(base_email or "").strip().partition("@")
+    prefix = local.split("+", 1)[0]
+    if not separator or not prefix or not domain:
+        raise ValueError("Outlook 基础邮箱格式无效")
+    tag = "".join(secrets.choice(PLUS_TAG_ALPHABET) for _ in range(PLUS_TAG_LENGTH))
+    return f"{prefix}+{tag}@{domain}"
 
 
 def _is_dead_rt_error(err: Any) -> bool:
@@ -603,6 +642,7 @@ def take_mailbox(
     log_callback: LogFn = None,
     max_attempts: int = 8,
     skip_empty_inbox: bool = True,
+    plus_alias: bool = False,
 ) -> Tuple[str, str]:
     """领取一个未使用的 Outlook 邮箱。
 
@@ -610,6 +650,9 @@ def take_mailbox(
     - 成功：返回 (email, token_key)
     - 失败：mark_used 并换下一个，避免把死 RT 带进 180s 等码
     若同时传入 http_get 且 skip_empty_inbox，Inbox 为 0 的号直接跳过。
+
+    plus_alias=True 时，基础账号按持久化游标轮询复用，返回随机五位 tag 的
+    prefix+tag@domain；只有死 RT / 鉴权失败才会淘汰基础账号。
 
     返回 (email, token_key)。token_key 供 wait_for_code 使用。
     """
@@ -622,6 +665,7 @@ def take_mailbox(
     for _ in range(attempts):
         used_file = used_path_for(path, used_path)
         email = ""
+        base_email = ""
         token_key = ""
         account: Dict[str, str] = {}
         with _lock:
@@ -629,8 +673,14 @@ def take_mailbox(
                 accounts = load_inventory(path)
                 used = _load_used(used_file)
                 picked = None
+                picked_index = -1
                 token_key = "outlook_rt:" + secrets.token_urlsafe(12)
-                for acc in accounts:
+                start_index = (
+                    _load_rotation_cursor(path, len(accounts)) if plus_alias else 0
+                )
+                for offset in range(len(accounts)):
+                    index = (start_index + offset) % len(accounts)
+                    acc = accounts[index]
                     cand = acc["email"].strip()
                     key = cand.lower()
                     if key in used or key in _reserved:
@@ -638,18 +688,24 @@ def take_mailbox(
                     if not _create_claim(path, cand, token_key):
                         continue
                     picked = acc
+                    picked_index = index
                     break
                 if not picked:
                     break
-                email = picked["email"].strip()
-                key = email.lower()
+                base_email = picked["email"].strip()
+                email = generate_plus_alias(base_email) if plus_alias else base_email
+                key = base_email.lower()
                 _reserved.add(key)
                 account = dict(picked)
+                if plus_alias:
+                    _save_rotation_cursor(path, (picked_index + 1) % len(accounts))
             if not account.get("client_id") and default_client_id:
                 account["client_id"] = default_client_id
             _token_map[token_key] = {
                 "account": account,
                 "email": email,
+                "base_email": base_email,
+                "plus_alias": bool(plus_alias),
                 "inventory_path": path,
                 "used_path": used_path,
                 "default_client_id": default_client_id or DEFAULT_CLIENT_ID,
@@ -675,7 +731,7 @@ def take_mailbox(
                 log_callback(f"[!] Outlook RT 预检失败，弃用当前库存项: {last_err}")
             try:
                 mark_used(
-                    email,
+                    base_email,
                     path,
                     used_path,
                     reason=f"precheck_fail:{last_err}",
@@ -695,7 +751,7 @@ def take_mailbox(
                         f"[!] Outlook RT Inbox 预检失败，保留该号继续用: {last_err}"
                     )
                 inbox_n = -1
-            if inbox_n == 0:
+            if inbox_n == 0 and not plus_alias:
                 last_err = "empty_inbox"
                 if log_callback:
                     log_callback("[*] Outlook RT Inbox=0，跳过空箱换号")
@@ -730,7 +786,9 @@ def release_reservation(token_key: str = "", email: str = "") -> None:
     with _lock:
         if token_key and token_key in _token_map:
             info = _token_map.pop(token_key, None) or {}
-            em = str(info.get("email") or email or "").strip().lower()
+            em = str(
+                info.get("base_email") or info.get("email") or email or ""
+            ).strip().lower()
             inventory_path = str(info.get("inventory_path") or "")
             if em:
                 if inventory_path:
@@ -739,14 +797,23 @@ def release_reservation(token_key: str = "", email: str = "") -> None:
                 _reserved.discard(em)
             return
         if email:
-            _reserved.discard(email.strip().lower())
+            lookup = email.strip().lower()
+            _reserved.discard(lookup)
             for k, info in list(_token_map.items()):
-                if str(info.get("email") or "").lower() == email.strip().lower():
+                aliases = {
+                    str(info.get("email") or "").strip().lower(),
+                    str(info.get("base_email") or "").strip().lower(),
+                }
+                if lookup in aliases:
                     _token_map.pop(k, None)
                     inventory_path = str(info.get("inventory_path") or "")
+                    base_email = str(
+                        info.get("base_email") or info.get("email") or email
+                    ).strip()
+                    _reserved.discard(base_email.lower())
                     if inventory_path:
                         with exclusive_file_lock(inventory_lock_path(inventory_path)):
-                            _release_claim(inventory_path, email, k)
+                            _release_claim(inventory_path, base_email, k)
 
 
 def _resolve_session(
@@ -760,7 +827,11 @@ def _resolve_session(
     email_l = (email or "").strip().lower()
     if email_l:
         for info in _token_map.values():
-            if str(info.get("email") or "").lower() == email_l:
+            aliases = {
+                str(info.get("email") or "").strip().lower(),
+                str(info.get("base_email") or "").strip().lower(),
+            }
+            if email_l in aliases:
                 return info
     raise Exception("Outlook RT token_key 无效或会话已过期，请重新取号")
 
@@ -804,7 +875,10 @@ def _list_messages_url(
     params = {
         "$top": str(max(5, min(50, int(top or 25)))),
         "$orderby": "receivedDateTime desc",
-        "$select": "id,subject,receivedDateTime,from,bodyPreview,body",
+        "$select": (
+            "id,subject,receivedDateTime,from,bodyPreview,body,"
+            "toRecipients,ccRecipients,internetMessageHeaders"
+        ),
     }
     resp = http_get(
         url,
@@ -870,14 +944,47 @@ def _message_blob(item: dict) -> Tuple[str, str, str]:
     return subject, preview, body
 
 
+def _message_matches_recipient(item: dict, recipient_email: str) -> bool:
+    target = str(recipient_email or "").strip().lower()
+    if not target:
+        return True
+    for key in ("toRecipients", "ToRecipients", "ccRecipients", "CcRecipients"):
+        recipients = item.get(key) or []
+        if not isinstance(recipients, list):
+            continue
+        for recipient in recipients:
+            if not isinstance(recipient, dict):
+                continue
+            email_obj = recipient.get("emailAddress") or recipient.get("EmailAddress") or {}
+            if isinstance(email_obj, dict):
+                address = str(email_obj.get("address") or email_obj.get("Address") or "")
+                if address.strip().lower() == target:
+                    return True
+    headers = item.get("internetMessageHeaders") or item.get("InternetMessageHeaders") or []
+    if isinstance(headers, list):
+        for header in headers:
+            if not isinstance(header, dict):
+                continue
+            name = str(header.get("name") or header.get("Name") or "").lower()
+            if name not in {"to", "delivered-to", "x-original-to", "envelope-to"}:
+                continue
+            value = str(header.get("value") or header.get("Value") or "").lower()
+            if target in value:
+                return True
+    return False
+
+
 def find_code_in_messages(
     messages: List[dict],
     *,
     seen: Optional[set] = None,
     after_ts: float = 0.0,
+    recipient_email: str = "",
 ) -> Optional[str]:
     seen = seen if seen is not None else set()
     for item in messages:
+        if recipient_email and not _message_matches_recipient(item, recipient_email):
+            continue
         mid = str(item.get("id") or item.get("Id") or "")
         subject, preview, body = _message_blob(item)
         fingerprint = mid or f"{subject}|{preview[:80]}"
@@ -971,6 +1078,8 @@ def _wait_for_code_unlocked(
     used_path = str(info.get("used_path") or "")
     default_client_id = str(info.get("default_client_id") or DEFAULT_CLIENT_ID)
     mailbox = str(account.get("email") or email)
+    delivery_email = str(info.get("email") or email)
+    reusable_base = bool(info.get("plus_alias"))
     after_ts = time.time() - 90
     deadline = time.time() + timeout
     seen: set = set()
@@ -996,7 +1105,7 @@ def _wait_for_code_unlocked(
                 log_callback(
                     f"[Debug] Outlook RT 标记已用失败: {_safe_error(exc)}"
                 )
-        release_reservation(token_key, mailbox)
+        release_reservation(token_key, delivery_email)
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -1047,9 +1156,14 @@ def _wait_for_code_unlocked(
                     raise Exception("Outlook RT Graph 鉴权失败，已弃用当前库存项") from exc
             sleep_with_cancel(poll_interval, cancel_callback)
             continue
-        code = find_code_in_messages(messages, seen=seen, after_ts=after_ts)
+        code = find_code_in_messages(
+            messages,
+            seen=seen,
+            after_ts=after_ts,
+            recipient_email=delivery_email if reusable_base else "",
+        )
         if code:
-            if mark_on_success and inventory_path:
+            if mark_on_success and inventory_path and not reusable_base:
                 try:
                     mark_used(mailbox, inventory_path, used_path, reason="code_ok")
                 except Exception as exc:
@@ -1061,8 +1175,11 @@ def _wait_for_code_unlocked(
                         "Outlook RT 库存状态写入失败，当前项保持预留"
                     ) from exc
             if log_callback:
-                log_callback("[*] Outlook RT 已提取验证码并完成库存记账")
-            release_reservation(token_key, mailbox)
+                if reusable_base:
+                    log_callback("[*] Outlook RT 已提取验证码并释放本次 plus 地址")
+                else:
+                    log_callback("[*] Outlook RT 已提取验证码并完成库存记账")
+            release_reservation(token_key, delivery_email)
             return code
         polls += 1
         now = time.time()
@@ -1074,7 +1191,7 @@ def _wait_for_code_unlocked(
                 empty_since = now
             empty_for = now - empty_since
             if empty_limit and empty_for >= empty_limit:
-                if inventory_path:
+                if inventory_path and not reusable_base:
                     try:
                         mark_used(
                             mailbox,
@@ -1087,10 +1204,10 @@ def _wait_for_code_unlocked(
                             log_callback(
                                 f"[Debug] Outlook RT 标记已用失败: {_safe_error(exc)}"
                             )
-                release_reservation(token_key, mailbox)
+                release_reservation(token_key, delivery_email)
                 if log_callback:
                     log_callback(
-                        f"[*] Outlook RT 连续 {int(empty_for)}s 仍是 0 封信，记 used 后换号"
+                        f"[*] Outlook RT 连续 {int(empty_for)}s 仍是 0 封信，释放本次地址后换号"
                     )
                 raise Exception(
                     f"Outlook RT 连续 {int(empty_for)}s 收件箱为空（0 封信），提前放弃"
@@ -1112,7 +1229,12 @@ def _wait_for_code_unlocked(
     # - 必须 release 预留，否则同进程换号会误判「库存耗尽」
     # - 若 refresh 一直正常（last_refresh_err 空），说明 xAI 侧可能已占用该邮箱，
     #   mark used 避免反复空等；若 refresh 曾失败则已在上面 retire
-    if inventory_path and not last_refresh_err and not graph_transient_failure:
+    if (
+        inventory_path
+        and not reusable_base
+        and not last_refresh_err
+        and not graph_transient_failure
+    ):
         try:
             mark_used(
                 mailbox,
@@ -1125,7 +1247,7 @@ def _wait_for_code_unlocked(
                 log_callback(
                     f"[Debug] Outlook RT 标记已用失败: {_safe_error(exc)}"
                 )
-    release_reservation(token_key, mailbox)
+    release_reservation(token_key, delivery_email)
     raise Exception(f"Outlook RT 在 {timeout}s 内未收到验证码邮件{hint}")
 
 

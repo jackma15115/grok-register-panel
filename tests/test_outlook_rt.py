@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import re
 import sys
 import tempfile
 import time
@@ -98,6 +99,36 @@ def test_take_mark_used_and_stats():
         assert "one@outlook.com" in used_file.read_text(encoding="utf-8")
 
 
+def test_plus_alias_round_robin_reuses_base_accounts():
+    with tempfile.TemporaryDirectory() as tmp:
+        inv = Path(tmp) / "stock.jsonl"
+        _write_jsonl(
+            inv,
+            [
+                {"email": "one@outlook.com", "refresh_token": "RT1"},
+                {"email": "two@hotmail.com", "refresh_token": "RT2"},
+            ],
+        )
+        outlook_rt._reserved.clear()
+        outlook_rt._token_map.clear()
+
+        first, token1 = outlook_rt.take_mailbox(str(inv), plus_alias=True)
+        outlook_rt.release_reservation(token1, first)
+        second, token2 = outlook_rt.take_mailbox(str(inv), plus_alias=True)
+        outlook_rt.release_reservation(token2, second)
+        third, token3 = outlook_rt.take_mailbox(str(inv), plus_alias=True)
+        outlook_rt.release_reservation(token3, third)
+
+        assert re.fullmatch(r"one\+[a-z0-9]{5}@outlook\.com", first)
+        assert re.fullmatch(r"two\+[a-z0-9]{5}@hotmail\.com", second)
+        assert re.fullmatch(r"one\+[a-z0-9]{5}@outlook\.com", third)
+        assert outlook_rt.inventory_stats(str(inv)) == {
+            "total": 2,
+            "used": 0,
+            "available": 2,
+        }
+
+
 def test_cross_process_claims_are_unique():
     with tempfile.TemporaryDirectory() as tmp:
         inv = Path(tmp) / "stock.jsonl"
@@ -142,6 +173,32 @@ def test_find_code_in_messages():
     ]
     code = outlook_rt.find_code_in_messages(messages, seen=set(), after_ts=0)
     assert code == "QO7-TUD"
+
+
+def test_find_code_matches_plus_recipient():
+    messages = [
+        {
+            "id": "wrong",
+            "subject": "BAD-111 xAI verification code",
+            "bodyPreview": "verification code BAD-111",
+            "toRecipients": [
+                {"emailAddress": {"address": "base+other@outlook.com"}}
+            ],
+        },
+        {
+            "id": "right",
+            "subject": "YES-222 xAI verification code",
+            "bodyPreview": "verification code YES-222",
+            "toRecipients": [
+                {"emailAddress": {"address": "base+a1b2c@outlook.com"}}
+            ],
+        },
+    ]
+    code = outlook_rt.find_code_in_messages(
+        messages,
+        recipient_email="base+a1b2c@outlook.com",
+    )
+    assert code == "YES-222"
 
 
 def test_graph_timestamp_is_utc_independent_of_host_timezone():
@@ -229,6 +286,67 @@ def test_wait_for_code_with_fake_http():
         assert "fake@outlook.com" not in joined
         assert "CXX-PC2" not in joined
         assert "RT_NEW" not in joined
+
+
+def test_wait_for_code_plus_alias_reuses_base_account():
+    with tempfile.TemporaryDirectory() as tmp:
+        inv = Path(tmp) / "stock.jsonl"
+        _write_jsonl(
+            inv,
+            [{"email": "reuse@outlook.com", "refresh_token": "RT_REUSE"}],
+        )
+        outlook_rt._reserved.clear()
+        outlook_rt._token_map.clear()
+        email, token_key = outlook_rt.take_mailbox(str(inv), plus_alias=True)
+
+        class Resp:
+            def __init__(self, payload, status=200):
+                self._payload = payload
+                self.status_code = status
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._payload
+
+        def http_post(_url, **_kwargs):
+            return Resp({"access_token": "AT_REUSE"})
+
+        def http_get(_url, **_kwargs):
+            return Resp(
+                {
+                    "value": [
+                        {
+                            "id": "reuse-message",
+                            "subject": "RUS-123 xAI verification code",
+                            "bodyPreview": "verification code RUS-123",
+                            "receivedDateTime": "2099-06-01T12:00:00Z",
+                            "toRecipients": [
+                                {"emailAddress": {"address": email}}
+                            ],
+                        }
+                    ]
+                }
+            )
+
+        code = outlook_rt.wait_for_code(
+            http_get,
+            http_post,
+            token_key,
+            email,
+            timeout=10,
+            poll_interval=0,
+            raise_if_cancelled=lambda _c: None,
+            sleep_with_cancel=lambda _s, _c: None,
+        )
+        assert code == "RUS-123"
+        used = outlook_rt.used_path_for(str(inv))
+        assert not used.exists()
+
+        next_email, next_token = outlook_rt.take_mailbox(str(inv), plus_alias=True)
+        try:
+            assert re.fullmatch(r"reuse\+[a-z0-9]{5}@outlook\.com", next_email)
+        finally:
+            outlook_rt.release_reservation(next_token, next_email)
 
 
 def test_wait_for_code_reads_junk_and_heartbeats():
@@ -701,10 +819,13 @@ def test_transient_graph_failure_does_not_consume_inventory():
 if __name__ == "__main__":
     test_load_jsonl_and_text_formats()
     test_take_mark_used_and_stats()
+    test_plus_alias_round_robin_reuses_base_accounts()
     test_cross_process_claims_are_unique()
     test_find_code_in_messages()
+    test_find_code_matches_plus_recipient()
     test_graph_timestamp_is_utc_independent_of_host_timezone()
     test_wait_for_code_with_fake_http()
+    test_wait_for_code_plus_alias_reuses_base_account()
     test_wait_for_code_reads_junk_and_heartbeats()
     test_wait_for_code_heartbeat_uses_info_prefix()
     test_wait_for_code_aborts_empty_inbox_and_marks_used()
