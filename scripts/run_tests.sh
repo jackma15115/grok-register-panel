@@ -16,6 +16,8 @@ tests=(
   tests/test_sso_recovery.py
   tests/test_sso_state.py
   tests/test_registration_risk_gate.py
+  tests/test_quality_probe.py
+  tests/test_quality_register.py
   tests/test_bfs_detect.py
   tests/test_bfs_ops.py
   tests/test_bfs_worker_integration.py
@@ -71,11 +73,14 @@ done
   account_sso_match_worker.py \
   account_sso_check_worker.py \
   scripts/run_python_isolated.py \
+  quality_probe.py \
   scripts/check_bfs.py \
   scripts/check_sso_state.py \
+  scripts/check_quality.py \
   webui/bfs_ops.py \
   webui/sso_state_ops.py \
   webui/account_sso_check_ops.py \
+  webui/quality_ops.py \
   static_asset_cache.py \
   batch_traffic.py \
   retry_policy.py \
