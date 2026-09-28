@@ -1206,8 +1206,13 @@ def _wait_for_code_unlocked(
                             )
                 release_reservation(token_key, delivery_email)
                 if log_callback:
+                    outcome = (
+                        "释放本次地址后换号"
+                        if reusable_base
+                        else "记 used 后换号"
+                    )
                     log_callback(
-                        f"[*] Outlook RT 连续 {int(empty_for)}s 仍是 0 封信，释放本次地址后换号"
+                        f"[*] Outlook RT 连续 {int(empty_for)}s 仍是 0 封信，{outcome}"
                     )
                 raise Exception(
                     f"Outlook RT 连续 {int(empty_for)}s 收件箱为空（0 封信），提前放弃"
