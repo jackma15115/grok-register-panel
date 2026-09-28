@@ -69,6 +69,12 @@ def test_provider_schema_and_defaults():
             field["name"] == "outlook_rt_inventory"
             for field in providers["outlook_rt"]["fields"]
         )
+        inline_field = next(
+            field for field in providers["outlook_rt"]["fields"]
+            if field["name"] == "outlook_rt_inventory_text"
+        )
+        assert inline_field["type"] == "textarea"
+        assert state["values"]["outlook_rt_inventory_text"] == ""
         assert providers["duckmail"]["configured"] is True
         assert providers["cloudmail"]["configured"] is False
         assert providers["inbucket"]["configured"] is False
@@ -175,6 +181,74 @@ def test_validation_rejects_unknown_fields_and_unsafe_values():
                 "cloudmail", {"defaultDomains": "https://mail.example.com"}
             )
         )
+
+
+def test_outlook_inline_inventory_is_materialized_without_echoing_content():
+    with IsolatedConfig() as config_path:
+        previous = email_provider_store.OUTLOOK_RT_INLINE_PATH
+        inventory_path = config_path.parent / "outlook_rt_inventory.txt"
+        email_provider_store.OUTLOOK_RT_INLINE_PATH = inventory_path
+        try:
+            line = "user@example.test----example-password----client-example----example-refresh-token"
+            saved = email_provider_store.save_email_provider_config(
+                "outlook_rt",
+                {"outlook_rt_inventory_text": line},
+            )
+            assert saved["configured"] is True
+            assert saved["values"]["outlook_rt_inventory_text"] == ""
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+            assert raw["outlook_rt_inventory"] == str(inventory_path)
+            assert raw["outlook_rt_inventory_text"] == ""
+            assert inventory_path.read_text(encoding="utf-8") == line + "\n"
+            assert line not in json.dumps(raw)
+            if os.name == "posix":
+                assert stat.S_IMODE(inventory_path.stat().st_mode) == 0o600
+        finally:
+            email_provider_store.OUTLOOK_RT_INLINE_PATH = previous
+
+
+def test_outlook_inline_connectivity_probe_does_not_persist_candidate():
+    import connectivity
+
+    with IsolatedConfig() as config_path:
+        previous_path = email_provider_store.OUTLOOK_RT_INLINE_PATH
+        canonical_path = config_path.parent / "outlook_rt_inventory.txt"
+        email_provider_store.OUTLOOK_RT_INLINE_PATH = canonical_path
+        canonical_path.write_text("existing inventory\n", encoding="utf-8")
+        email_provider_store.save_email_provider_config(
+            "outlook_rt", {"outlook_rt_inventory": str(canonical_path)}
+        )
+        before = config_path.read_text(encoding="utf-8")
+        candidate_paths = []
+        previous_check = connectivity.check_email_api
+
+        def fake_check(_provider, candidate, *_args):
+            candidate_path = Path(candidate["outlook_rt_inventory"])
+            candidate_paths.append(candidate_path)
+            assert candidate_path != canonical_path
+            assert candidate_path.read_text(encoding="utf-8").startswith("user@example.test----")
+            return "邮箱API", True, "库存格式有效"
+
+        connectivity.check_email_api = fake_check
+        try:
+            result = email_provider_store.test_email_provider_config(
+                "outlook_rt",
+                {
+                    "outlook_rt_inventory_text": (
+                        "user@example.test----example-password----client-example----example-refresh-token"
+                    )
+                },
+                http_get=lambda *_args, **_kwargs: None,
+                http_post=lambda *_args, **_kwargs: None,
+            )
+        finally:
+            connectivity.check_email_api = previous_check
+            email_provider_store.OUTLOOK_RT_INLINE_PATH = previous_path
+        assert result["ok"] is True
+        assert len(candidate_paths) == 1
+        assert not candidate_paths[0].exists()
+        assert config_path.read_text(encoding="utf-8") == before
+        assert canonical_path.read_text(encoding="utf-8") == "existing inventory\n"
 
 
 def test_connectivity_uses_unsaved_form_and_preserves_saved_secret():
@@ -329,4 +403,6 @@ if __name__ == "__main__":
     test_cloudflare_direct_create_does_not_probe_admin_domains()
     test_cloudflare_admin_create_does_not_probe_mailbox_domains()
     test_inbucket_requires_base_and_domain()
+    test_outlook_inline_inventory_is_materialized_without_echoing_content()
+    test_outlook_inline_connectivity_probe_does_not_persist_candidate()
     print("OK email provider store")

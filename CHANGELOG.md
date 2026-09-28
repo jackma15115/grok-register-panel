@@ -4,6 +4,7 @@
 
 ### Changed
 
+- 面板支持在 Outlook RT 配置中直接粘贴多行库存；内容会以私有文件保存到 Docker 的 `/data` 挂载目录，原库存文件路径方式继续兼容。
 - 降智测试只按有没有 thinking 判定：有 thinking 为正常，没有为降智。不再用 Token/s / `burst` / `soft` 分档。
 - Outlook RT 基础账号改为轮询复用；每次注册生成随机五位 tag 的 plus 地址，并按收件地址匹配验证码。成功、空箱或超时只释放本次地址，死 RT / 鉴权失败才淘汰基础账号。
 

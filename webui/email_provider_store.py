@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from secure_files import atomic_write_json, exclusive_file_lock
+from secure_files import (
+    atomic_write_json,
+    atomic_write_text,
+    ensure_private_dir,
+    exclusive_file_lock,
+)
 from webui.email_domain_store import EmailDomainValidationError, normalize_domain
 from webui.security_utils import redact_log_line
 
@@ -20,6 +26,9 @@ CONFIG_PATH = Path(
     or str(ROOT / "config.json")
 )
 LOCK_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".lock")
+DATA_DIR = Path(os.environ.get("GROK_REGISTER_DATA_DIR") or str(ROOT / "data"))
+OUTLOOK_RT_INLINE_PATH = DATA_DIR / "outlook_rt_inventory.txt"
+OUTLOOK_RT_INLINE_MAX_LENGTH = 1024 * 1024
 
 PROVIDER_LABELS = {
     "outlook_rt": "Outlook RT 库存（推荐）",
@@ -220,9 +229,15 @@ FIELD_DEFINITIONS = {
         ],
     },
     "outlook_rt_inventory": {
-        "label": "库存文件路径",
+        "label": "库存文件路径（可选）",
         "type": "text",
-        "placeholder": "/path/to/outlook_latest_50_with_rt.jsonl",
+        "placeholder": "仅使用已有文件时填写，如 /data/outlook.jsonl",
+    },
+    "outlook_rt_inventory_text": {
+        "label": "直接粘贴库存（可选）",
+        "type": "textarea",
+        "placeholder": "每行：邮箱----密码----client_id----refresh_token\n留空表示使用上面的库存文件路径",
+        "rows": 7,
     },
     "outlook_rt_used_path": {
         "label": "已用记录路径（可选）",
@@ -294,6 +309,7 @@ PROVIDER_FIELDS = {
         "ti_temp_mail_mode",
     ),
     "outlook_rt": (
+        "outlook_rt_inventory_text",
         "outlook_rt_inventory",
         "outlook_rt_used_path",
         "outlook_rt_client_id",
@@ -439,6 +455,13 @@ def _normalize_value(name: str, value: object):
         if text and any(ch in text for ch in "\n\r\0"):
             raise EmailProviderConfigError("库存路径无效")
         return text
+    if name == "outlook_rt_inventory_text":
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if "\0" in text or any(ord(ch) < 32 and ch not in "\n\t" for ch in text):
+            raise EmailProviderConfigError("库存内容包含非法控制字符")
+        if len(text) > OUTLOOK_RT_INLINE_MAX_LENGTH:
+            raise EmailProviderConfigError("库存内容过长")
+        return text
     return _string(value, strip=name != "cloudmail_password")
 
 
@@ -488,7 +511,7 @@ def _public_state(raw: dict, error: str = "") -> dict:
     if active not in SUPPORTED_PROVIDERS:
         active = "cloudflare"
     public_values = {
-        name: "" if name in SECRET_FIELDS else values.get(name, definition.get("default", ""))
+        name: "" if name in SECRET_FIELDS or name == "outlook_rt_inventory_text" else values.get(name, definition.get("default", ""))
         for name, definition in FIELD_DEFINITIONS.items()
     }
     secret_configured = {name: bool(values.get(name)) for name in SECRET_FIELDS}
@@ -536,6 +559,8 @@ def _candidate_config(
     provider: object,
     settings: object,
     clear_secrets: object = None,
+    *,
+    inline_inventory_path: Path | None = None,
 ) -> dict:
     normalized_provider = _provider(provider)
     if not isinstance(settings, dict):
@@ -559,6 +584,14 @@ def _candidate_config(
         if name in SECRET_FIELDS and not str(value or ""):
             continue
         updated[name] = _normalize_value(name, value)
+    if normalized_provider == "outlook_rt":
+        inline = str(updated.get("outlook_rt_inventory_text") or "").strip()
+        if inline:
+            inventory_path = inline_inventory_path or OUTLOOK_RT_INLINE_PATH
+            ensure_private_dir(inventory_path.parent)
+            atomic_write_text(inventory_path, inline + "\n")
+            updated["outlook_rt_inventory"] = str(inventory_path)
+        updated["outlook_rt_inventory_text"] = ""
     for name in clear:
         updated[name] = ""
     return updated
@@ -593,8 +626,35 @@ def test_email_provider_config(
         raw, error = _read_unlocked()
     if error:
         raise RuntimeError(f"config.json 无法读取: {error}")
-    candidate = _candidate_config(raw, provider, settings, clear_secrets)
     normalized_provider = _provider(provider)
+    probe_inventory_path = None
+    if (
+        normalized_provider == "outlook_rt"
+        and isinstance(settings, dict)
+        and _normalize_value(
+            "outlook_rt_inventory_text", settings.get("outlook_rt_inventory_text", "")
+        )
+    ):
+        ensure_private_dir(OUTLOOK_RT_INLINE_PATH.parent)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".outlook_rt_probe_",
+            suffix=".txt",
+            dir=str(OUTLOOK_RT_INLINE_PATH.parent),
+        )
+        os.close(fd)
+        probe_inventory_path = Path(temp_name)
+    try:
+        candidate = _candidate_config(
+            raw,
+            normalized_provider,
+            settings,
+            clear_secrets,
+            inline_inventory_path=probe_inventory_path,
+        )
+    except Exception:
+        if probe_inventory_path is not None:
+            probe_inventory_path.unlink(missing_ok=True)
+        raise
     if http_get is None or http_post is None:
         import requests
 
@@ -602,12 +662,16 @@ def test_email_provider_config(
         http_post = http_post or requests.post
     import connectivity
 
-    _, ok, detail = connectivity.check_email_api(
-        normalized_provider,
-        candidate,
-        http_get,
-        http_post,
-    )
+    try:
+        _, ok, detail = connectivity.check_email_api(
+            normalized_provider,
+            candidate,
+            http_get,
+            http_post,
+        )
+    finally:
+        if probe_inventory_path is not None:
+            probe_inventory_path.unlink(missing_ok=True)
     return {
         "ok": bool(ok),
         "provider": normalized_provider,

@@ -198,6 +198,7 @@ Windows 不要把 `PLAYWRIGHT_NODEJS_PATH` 指到 `scripts/playwright-node`（�
 |------|------|
 | `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `ti-temp-mail` / `outlook_rt` / `inbucket` |
 | `outlook_rt_inventory` | Outlook MSA 库存路径（jsonl、`email----rt`，或 `email----password----client_id----refresh_token`） |
+| 面板“直接粘贴库存” | 在“邮箱服务 → Outlook RT 库存”中直接粘贴多行 `email----password----client_id----refresh_token`；Docker 会自动保存到挂载的 `/data`，无需填写容器路径。 |
 | `outlook_rt_used_path` | 失效基础邮箱记录（可选；默认 `库存路径.used`） |
 | `outlook_rt_client_id` | 可选 Client ID；默认 Microsoft Authentication Broker 公共客户端 |
 | `defaultDomains` | 临时邮域名（如二级 CF 域） |

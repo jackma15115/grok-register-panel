@@ -1819,8 +1819,11 @@ HTML = r"""<!DOCTYPE html>
     padding: 18px 0;
   }
   .mail-provider-fields .field { min-width: 0; gap: 5px; }
+  .mail-provider-fields .mail-provider-wide-field { grid-column: 1 / -1; }
   .mail-provider-fields input,
-  .mail-provider-fields select { width: 100%; min-height: 40px; }
+  .mail-provider-fields select,
+  .mail-provider-fields textarea { width: 100%; min-height: 40px; }
+  .mail-provider-fields textarea { min-height: 140px; resize: vertical; font-family: inherit; line-height: 1.45; }
   .mail-secret-wrap { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
   .mail-secret-wrap button { min-width: 54px; min-height: 40px; padding-inline: 10px; font-size: 11px; }
   .mail-secret-wrap.pending-clear input { border-color: var(--warn); }
@@ -3411,6 +3414,9 @@ function emailProviderFieldControl(field) {
   const id = "mail-field-" + field.name;
   const raw = emailProviderData && emailProviderData.values ? emailProviderData.values[field.name] : "";
   const value = raw ?? field.default ?? "";
+  if (field.type === "textarea") {
+    return `<textarea id="${esc(id)}" data-mail-field="${esc(field.name)}" rows="${Number(field.rows || 6)}" placeholder="${esc(field.placeholder || "")}" spellcheck="false">${esc(value)}</textarea>`;
+  }
   if (field.type === "select") {
     const options = (field.options || []).map(option => {
       const optionValue = typeof option === "object" ? option.value : option;
@@ -3452,7 +3458,7 @@ function renderEmailProviderFields(provider) {
   status.textContent = definition.configured ? "已配置" : "待配置";
   status.className = "badge " + (definition.configured ? "ok" : "warn");
   document.getElementById("mail-provider-fields").innerHTML = (definition.fields || []).map(field =>
-    `<div class="field"><label for="mail-field-${esc(field.name)}">${esc(field.label)}</label>${emailProviderFieldControl(field)}</div>`
+    `<div class="field${field.type === "textarea" ? " mail-provider-wide-field" : ""}"><label for="mail-field-${esc(field.name)}">${esc(field.label)}</label>${emailProviderFieldControl(field)}</div>`
   ).join("") || '<div class="field"><label>服务配置</label><input disabled value="该服务商没有可编辑字段"/></div>';
   const domainProvider = document.getElementById("domain-provider");
   if (domainProvider && ["cloudflare", "cloudmail", "moemail", "yyds", "ti-temp-mail"].includes(definition.id)) {
